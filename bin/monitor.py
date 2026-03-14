@@ -451,7 +451,16 @@ def get_soundbar_state() -> dict:
       mute:   "on" | "off"
       input:  str (input source number)
     """
-    state = {"power": "standby", "volume": 0, "mute": "off", "input": "0", "_api_ok": False}
+    fallback_volume = get_volume_override() or (int(_last_volume) if _last_volume.isdigit() else 0)
+    fallback_mute = _last_mute if _last_mute in ("on", "off") else "off"
+    fallback_input = _last_input if _last_input else "0"
+    state = {
+        "power": "standby",
+        "volume": fallback_volume,
+        "mute": fallback_mute,
+        "input": fallback_input,
+        "_api_ok": False,
+    }
 
     power_data = api_get("powerstatus")
     if power_data:
@@ -461,7 +470,8 @@ def get_soundbar_state() -> dict:
 
     state["power"] = "on"
 
-    status = api_get("status")
+    status_timeout = _config.getint("MONITOR", "STATUS_TIMEOUT", fallback=2)
+    status = api_get("status", timeout=status_timeout)
     if status:
         state["volume"] = int(status.get("Volume", 0))
         state["mute"] = "on" if status.get("MuteStatus", False) else "off"
@@ -659,6 +669,10 @@ def handle_command(cmd: str) -> None:
             if not _config.getboolean("EXPERIMENTAL", "ENABLE_INPUT_SWITCHING", fallback=False):
                 log.warning(f"{cmd} ignored: input switching is not verified for this device and is disabled by default")
                 cmd_done(False, {"action": "input_switch", "error": "disabled_by_config"})
+                return
+            if not _config.getboolean("EXPERIMENTAL", "ENABLE_UNSAFE_HTTP_INPUT", fallback=False):
+                log.warning(f"{cmd} ignored: unsafe HTTP input switching is disabled (it currently destabilizes LibreKNX on this firmware)")
+                cmd_done(False, {"action": "input_switch", "error": "unsafe_http_input_disabled"})
                 return
             source = cmd[6:]  # "input_3" → "3"
             # Try capitalized key first (as hinted by NEXT_SESSION), then lowercase fallback.

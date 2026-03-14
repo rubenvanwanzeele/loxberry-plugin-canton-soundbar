@@ -101,11 +101,13 @@ $input_topic  = $plugin_cfg['MQTT']['INPUT_TOPIC']      ?? 'loxberry/plugin/cant
 $cmd_topic    = $plugin_cfg['MQTT']['CMD_TOPIC']        ?? 'loxberry/plugin/cantonbar/cmd';
 $poll_int     = $plugin_cfg['MONITOR']['POLL_INTERVAL'] ?? '5';
 $loglevel     = $plugin_cfg['MONITOR']['LOGLEVEL']      ?? '4';
+$status_timeout = $plugin_cfg['MONITOR']['STATUS_TIMEOUT'] ?? '2';
 $recover_threshold = $plugin_cfg['RECOVERY']['FAILURE_THRESHOLD'] ?? '3';
 $recover_cooldown  = $plugin_cfg['RECOVERY']['COOLDOWN_SECONDS']  ?? '90';
 $token_action      = $plugin_cfg['RECOVERY']['TOKEN_ACTION']      ?? '';
 $enable_power_off = !empty($plugin_cfg['EXPERIMENTAL']['ENABLE_POWER_OFF']) && $plugin_cfg['EXPERIMENTAL']['ENABLE_POWER_OFF'] !== '0';
 $enable_input_switching = !empty($plugin_cfg['EXPERIMENTAL']['ENABLE_INPUT_SWITCHING']) && $plugin_cfg['EXPERIMENTAL']['ENABLE_INPUT_SWITCHING'] !== '0';
+$enable_unsafe_http_input = !empty($plugin_cfg['EXPERIMENTAL']['ENABLE_UNSAFE_HTTP_INPUT']) && $plugin_cfg['EXPERIMENTAL']['ENABLE_UNSAFE_HTTP_INPUT'] !== '0';
 
 $save_msg = '';
 $save_ok  = true;
@@ -126,11 +128,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
     $new_cmd_t   = trim($_POST['cmd_topic']    ?? $cmd_topic);
     $new_poll    = max(1, min(60, (int)($_POST['poll_int']  ?? 5)));
     $new_ll      = max(1, min(6,  (int)($_POST['loglevel'] ?? 4)));
+    $new_status_timeout = max(1, min(10, (int)($_POST['status_timeout'] ?? 2)));
     $new_fail_threshold = max(1, min(20, (int)($_POST['recover_threshold'] ?? 3)));
     $new_cooldown = max(10, min(3600, (int)($_POST['recover_cooldown'] ?? 90)));
     $new_token_action = trim($_POST['token_action'] ?? '');
     $new_enable_power_off = isset($_POST['enable_power_off']) ? 1 : 0;
     $new_enable_input_switching = isset($_POST['enable_input_switching']) ? 1 : 0;
+    $new_enable_unsafe_http_input = isset($_POST['enable_unsafe_http_input']) ? 1 : 0;
 
     // Auto-discover MAC via ARP if left blank
     if (empty($new_mac) && !empty($new_ip)) {
@@ -153,7 +157,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
     $cfg_content .= "CMD_TOPIC=$new_cmd_t\n\n";
     $cfg_content .= "[MONITOR]\n";
     $cfg_content .= "POLL_INTERVAL=$new_poll\n";
-    $cfg_content .= "LOGLEVEL=$new_ll\n\n";
+    $cfg_content .= "LOGLEVEL=$new_ll\n";
+    $cfg_content .= "STATUS_TIMEOUT=$new_status_timeout\n\n";
     $cfg_content .= "[RECOVERY]\n";
     $cfg_content .= "FAILURE_THRESHOLD=$new_fail_threshold\n";
     $cfg_content .= "COOLDOWN_SECONDS=$new_cooldown\n";
@@ -161,6 +166,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
     $cfg_content .= "[EXPERIMENTAL]\n";
     $cfg_content .= "ENABLE_POWER_OFF=$new_enable_power_off\n";
     $cfg_content .= "ENABLE_INPUT_SWITCHING=$new_enable_input_switching\n";
+    $cfg_content .= "ENABLE_UNSAFE_HTTP_INPUT=$new_enable_unsafe_http_input\n";
 
     @mkdir($lbpconfigdir, 0755, true);
     $written = file_put_contents("$lbpconfigdir/cantonbar.cfg", $cfg_content);
@@ -174,11 +180,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
         $state_topic = $new_state_t; $volume_topic = $new_vol_t;
         $mute_topic  = $new_mute_t;  $input_topic  = $new_input_t;
         $cmd_topic   = $new_cmd_t;   $poll_int = $new_poll; $loglevel = $new_ll;
+        $status_timeout = $new_status_timeout;
         $recover_threshold = $new_fail_threshold;
         $recover_cooldown = $new_cooldown;
         $token_action = $new_token_action;
         $enable_power_off = (bool)$new_enable_power_off;
         $enable_input_switching = (bool)$new_enable_input_switching;
+        $enable_unsafe_http_input = (bool)$new_enable_unsafe_http_input;
         $save_msg = "Configuration saved. Daemon restarted.";
     }
 }
@@ -368,6 +376,13 @@ LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
             </div>
         </div>
         <div class="form-group row">
+            <label class="col-sm-4 col-form-label">Status timeout (s)</label>
+            <div class="col-sm-2">
+                <input type="number" name="status_timeout" class="form-control" value="<?= (int)$status_timeout ?>" min="1" max="10">
+            </div>
+            <div class="col-sm-6"><small class="form-text text-muted">Timeout for <code>action=status</code>. Lower values reduce UI lag if LibreKNX hangs.</small></div>
+        </div>
+        <div class="form-group row">
             <label class="col-sm-4 col-form-label">API failure threshold</label>
             <div class="col-sm-2">
                 <input type="number" name="recover_threshold" class="form-control" value="<?= (int)$recover_threshold ?>" min="1" max="20">
@@ -406,6 +421,16 @@ LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
                     <label class="form-check-label" for="enable_input_switching">Enable input_N commands</label>
                 </div>
                 <small class="form-text text-muted">Disabled by default because tested input actions are currently unverified and may crash LibreKNX.</small>
+            </div>
+        </div>
+        <div class="form-group row">
+            <label class="col-sm-4 col-form-label">Unsafe HTTP input write</label>
+            <div class="col-sm-8">
+                <div class="form-check mt-2">
+                    <input class="form-check-input" type="checkbox" name="enable_unsafe_http_input" id="enable_unsafe_http_input" value="1"<?= $enable_unsafe_http_input ? ' checked' : '' ?>>
+                    <label class="form-check-label" for="enable_unsafe_http_input">Allow <code>POST action=input</code> attempts</label>
+                </div>
+                <small class="form-text text-danger">Only enable for diagnostics. On current firmware this call frequently crashes LibreKNX.</small>
             </div>
         </div>
 
