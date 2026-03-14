@@ -1,6 +1,7 @@
 <?php
 require_once "/opt/loxberry/libs/phplib/loxberry_system.php";
 require_once "/opt/loxberry/libs/phplib/loxberry_web.php";
+require_once "/opt/loxberry/libs/phplib/loxberry_io.php";
 
 $lbpconfigdir = $lbpconfigdir ?? "/opt/loxberry/config/plugins/cantonbar";
 $lbplogdir    = $lbplogdir    ?? "/opt/loxberry/log/plugins/cantonbar";
@@ -9,6 +10,18 @@ $lbplogdir    = $lbplogdir    ?? "/opt/loxberry/log/plugins/cantonbar";
 // Helper: read MQTT broker connection details from LoxBerry general.json
 // -------------------------------------------------------------------------
 function get_mqtt_details(): array {
+    // LoxBerry-native helper (same approach as Samsung plugin UI)
+    if (function_exists('mqtt_connectiondetails')) {
+        $mqtt_cred = mqtt_connectiondetails();
+        return [
+            'host' => !empty($mqtt_cred['brokerhost']) ? $mqtt_cred['brokerhost'] : 'localhost',
+            'port' => !empty($mqtt_cred['brokerport']) ? (string)$mqtt_cred['brokerport'] : '1883',
+            'user' => !empty($mqtt_cred['brokeruser']) ? $mqtt_cred['brokeruser'] : '',
+            'pass' => !empty($mqtt_cred['brokerpass']) ? $mqtt_cred['brokerpass'] : '',
+        ];
+    }
+
+    // Defensive fallback for environments where helper is unavailable
     $gen = @json_decode(@file_get_contents('/opt/loxberry/config/system/general.json'), true);
     return [
         'host' => $gen['Mqtt']['Brokerhost'] ?? 'localhost',
