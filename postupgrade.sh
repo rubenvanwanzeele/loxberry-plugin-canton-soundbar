@@ -23,6 +23,7 @@ if command -v adb >/dev/null 2>&1; then
 else
     echo "<WARNING> adb not found in postupgrade check."
     echo "<WARNING> This script runs as loxberry and cannot apt-install system packages."
-    echo "<WARNING> Install manually: sudo apt install -y android-tools-adb"
+    echo "<WARNING> Install manually: sudo apt install -y adb"
+    echo "<WARNING> Or on some systems: sudo apt install -y android-tools-adb"
 fi
 exit 0

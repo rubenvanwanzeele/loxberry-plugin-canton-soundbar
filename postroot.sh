@@ -8,11 +8,14 @@ if command -v adb >/dev/null 2>&1; then
 else
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y >/dev/null 2>&1 || true
-    if apt-get install -y android-tools-adb >/dev/null 2>&1; then
-        echo "<OK> Installed android-tools-adb"
+    if apt-get install -y adb >/dev/null 2>&1; then
+        echo "<OK> Installed adb package"
+    elif apt-get install -y android-tools-adb >/dev/null 2>&1; then
+        echo "<OK> Installed android-tools-adb package"
     else
-        echo "<WARNING> Could not install android-tools-adb in postroot."
-        echo "<WARNING> Install manually: sudo apt install -y android-tools-adb"
+        echo "<WARNING> Could not install adb package in postroot."
+        echo "<WARNING> Install manually: sudo apt install -y adb"
+        echo "<WARNING> Or: sudo apt install -y android-tools-adb"
     fi
 fi
 
