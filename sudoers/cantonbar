@@ -1,0 +1,4 @@
+loxberry ALL=(root) NOPASSWD: /bin/systemctl start cantonbar.service
+loxberry ALL=(root) NOPASSWD: /bin/systemctl stop cantonbar.service
+loxberry ALL=(root) NOPASSWD: /bin/systemctl restart cantonbar.service
+loxberry ALL=(root) NOPASSWD: /bin/systemctl status cantonbar.service

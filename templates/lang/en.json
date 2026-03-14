@@ -1,0 +1,6 @@
+{
+    "PLUGIN": {
+        "NAME": "Canton Smart Soundbar",
+        "DESCRIPTION": "Local MQTT integration for Canton Smart Soundbar 10"
+    }
+}

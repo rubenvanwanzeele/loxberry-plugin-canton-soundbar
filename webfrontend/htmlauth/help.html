@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>Canton Smart Soundbar – Help</title></head>
+<body>
+<h2>Canton Smart Soundbar Plugin</h2>
+<p>Two-way local MQTT integration for the Canton Smart Soundbar 10.</p>
+
+<h3>Setup</h3>
+<ol>
+  <li>Enter the soundbar IP address and click <strong>Save Configuration</strong>.</li>
+  <li>The MAC address is auto-discovered via ARP on save. It is required for <code>power_on</code>.</li>
+</ol>
+
+<h3>MQTT State Topics (plugin → Loxone)</h3>
+<table border="1" cellpadding="4">
+  <tr><th>Topic</th><th>Values</th><th>Notes</th></tr>
+  <tr><td>…/state</td><td><code>on</code> / <code>standby</code></td><td>retained</td></tr>
+  <tr><td>…/volume</td><td>0–100</td><td>retained, integer</td></tr>
+  <tr><td>…/mute</td><td><code>on</code> / <code>off</code></td><td>retained</td></tr>
+  <tr><td>…/input</td><td>input source number</td><td>retained</td></tr>
+</table>
+
+<h3>MQTT Commands (Loxone → plugin)</h3>
+<p>Publish to the command topic:</p>
+<table border="1" cellpadding="4">
+  <tr><th>Payload</th><th>Action</th></tr>
+  <tr><td><code>power_on</code></td><td>Wake soundbar via Wake-on-LAN</td></tr>
+  <tr><td><code>power_off</code></td><td>Put soundbar in network standby</td></tr>
+  <tr><td><code>volume_set_40</code></td><td>Set volume to 40 (0–100)</td></tr>
+  <tr><td><code>volume_up</code></td><td>Increase volume by step (default 5)</td></tr>
+  <tr><td><code>volume_down</code></td><td>Decrease volume by step</td></tr>
+  <tr><td><code>mute_on</code></td><td>Mute</td></tr>
+  <tr><td><code>mute_off</code></td><td>Unmute</td></tr>
+  <tr><td><code>mute_toggle</code></td><td>Toggle mute</td></tr>
+  <tr><td><code>input_3</code></td><td>Switch to input source 3</td></tr>
+</table>
+</body>
+</html>
