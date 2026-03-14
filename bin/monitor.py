@@ -81,9 +81,13 @@ _last_state: str = ""
 _last_volume: str = ""
 _last_mute: str = ""
 _last_input: str = ""
+_last_input_name: str = ""
 _volume_override: int | None = None
 _volume_override_ts: float = 0.0
 _trace_seq = 0
+_source_map: dict[str, str] = {}
+_source_map_ts: float = 0.0
+_last_input_map_json: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +181,35 @@ def get_volume_override(max_age_s: int = 1800) -> int | None:
     if time.time() - _volume_override_ts > max_age_s:
         return None
     return _volume_override
+
+
+def refresh_source_map(force: bool = False) -> None:
+    """Fetch and cache source number->name mapping from action=sources."""
+    global _source_map, _source_map_ts
+
+    now = time.time()
+    max_age_s = _config.getint("MONITOR", "SOURCE_MAP_REFRESH_SECONDS", fallback=300)
+    if not force and _source_map and (now - _source_map_ts) < max_age_s:
+        return
+
+    sources = api_get("sources", timeout=3)
+    if not isinstance(sources, dict) or not sources:
+        return
+
+    inv: dict[str, str] = {}
+    for name, number in sources.items():
+        key = str(number)
+        val = str(name)
+        if key and val:
+            inv[key] = val
+
+    if inv:
+        _source_map = inv
+        _source_map_ts = now
+
+
+def input_name_for(value: str) -> str:
+    return _source_map.get(str(value), f"SRC_{value}")
 
 
 def _run_cmd(cmd: list[str], timeout: int = 8) -> tuple[int, str, str]:
@@ -459,6 +492,7 @@ def get_soundbar_state() -> dict:
         "volume": fallback_volume,
         "mute": fallback_mute,
         "input": fallback_input,
+        "input_name": input_name_for(fallback_input),
         "_api_ok": False,
     }
 
@@ -469,6 +503,7 @@ def get_soundbar_state() -> dict:
         return state  # standby — no point polling the rest
 
     state["power"] = "on"
+    refresh_source_map()
 
     status_timeout = _config.getint("MONITOR", "STATUS_TIMEOUT", fallback=2)
     status = api_get("status", timeout=status_timeout)
@@ -485,6 +520,7 @@ def get_soundbar_state() -> dict:
     inp = api_get("input")
     if inp:
         state["input"] = str(inp.get("InputSource", "0"))
+        state["input_name"] = input_name_for(state["input"])
 
     return state
 
@@ -501,17 +537,20 @@ def _publish(topic: str, value: str, retain: bool = True) -> None:
 
 
 def publish_state(state: dict) -> None:
-    global _last_state, _last_volume, _last_mute, _last_input
+    global _last_state, _last_volume, _last_mute, _last_input, _last_input_name, _last_input_map_json
 
     power  = state["power"]
     volume = str(state["volume"])
     mute   = state["mute"]
     inp    = state["input"]
+    inp_name = state.get("input_name", input_name_for(inp))
 
     state_topic  = _config.get("MQTT", "STATE_TOPIC",  fallback="loxberry/plugin/cantonbar/state")
     volume_topic = _config.get("MQTT", "VOLUME_TOPIC", fallback="loxberry/plugin/cantonbar/volume")
     mute_topic   = _config.get("MQTT", "MUTE_TOPIC",   fallback="loxberry/plugin/cantonbar/mute")
     input_topic  = _config.get("MQTT", "INPUT_TOPIC",  fallback="loxberry/plugin/cantonbar/input")
+    input_name_topic = _config.get("MQTT", "INPUT_NAME_TOPIC", fallback="loxberry/plugin/cantonbar/input_name")
+    input_map_topic = _config.get("MQTT", "INPUT_MAP_TOPIC", fallback="loxberry/plugin/cantonbar/input_map")
 
     if power != _last_state:
         _publish(state_topic, power)
@@ -533,11 +572,24 @@ def publish_state(state: dict) -> None:
         log.info(f"Input → {inp!r}")
         _last_input = inp
 
+    if inp_name != _last_input_name:
+        _publish(input_name_topic, inp_name)
+        log.info(f"Input name → {inp_name!r}")
+        _last_input_name = inp_name
+
+    if _source_map:
+        mapping_json = json.dumps(_source_map, sort_keys=True, separators=(",", ":"))
+        if mapping_json != _last_input_map_json:
+            _publish(input_map_topic, mapping_json)
+            _last_input_map_json = mapping_json
+
 
 def republish_all() -> None:
     """Clear cached values so everything is re-published on next poll (e.g. after MQTT reconnect)."""
-    global _last_state, _last_volume, _last_mute, _last_input
+    global _last_state, _last_volume, _last_mute, _last_input, _last_input_name, _last_input_map_json
     _last_state = _last_volume = _last_mute = _last_input = ""
+    _last_input_name = ""
+    _last_input_map_json = ""
 
 
 # ---------------------------------------------------------------------------

@@ -66,6 +66,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'status') {
     $volume_t   = $plugin_cfg['MQTT']['VOLUME_TOPIC'] ?? 'loxberry/plugin/cantonbar/volume';
     $mute_t     = $plugin_cfg['MQTT']['MUTE_TOPIC']   ?? 'loxberry/plugin/cantonbar/mute';
     $input_t    = $plugin_cfg['MQTT']['INPUT_TOPIC']  ?? 'loxberry/plugin/cantonbar/input';
+    $input_name_t = $plugin_cfg['MQTT']['INPUT_NAME_TOPIC'] ?? 'loxberry/plugin/cantonbar/input_name';
     $health_base = $plugin_cfg['MQTT']['HEALTH_BASE_TOPIC'] ?? 'loxberry/plugin/cantonbar/health';
     $api_health_t = $plugin_cfg['MQTT']['API_HEALTH_TOPIC'] ?? ($health_base . '/api');
     $adb_health_t = $plugin_cfg['MQTT']['ADB_HEALTH_TOPIC'] ?? ($health_base . '/adb');
@@ -78,6 +79,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'status') {
         'volume'  => mqsub($mq, $volume_t) ?: '-',
         'mute'    => mqsub($mq, $mute_t)   ?: '-',
         'input'   => mqsub($mq, $input_t)  ?: '-',
+        'input_name' => mqsub($mq, $input_name_t) ?: '-',
         'api'     => mqsub($mq, $api_health_t) ?: 'unknown',
         'adb'     => mqsub($mq, $adb_health_t) ?: 'unknown',
         'libreknx'=> mqsub($mq, $libreknx_health_t) ?: 'unknown',
@@ -98,6 +100,8 @@ $state_topic  = $plugin_cfg['MQTT']['STATE_TOPIC']      ?? 'loxberry/plugin/cant
 $volume_topic = $plugin_cfg['MQTT']['VOLUME_TOPIC']     ?? 'loxberry/plugin/cantonbar/volume';
 $mute_topic   = $plugin_cfg['MQTT']['MUTE_TOPIC']       ?? 'loxberry/plugin/cantonbar/mute';
 $input_topic  = $plugin_cfg['MQTT']['INPUT_TOPIC']      ?? 'loxberry/plugin/cantonbar/input';
+$input_name_topic = $plugin_cfg['MQTT']['INPUT_NAME_TOPIC'] ?? 'loxberry/plugin/cantonbar/input_name';
+$input_map_topic  = $plugin_cfg['MQTT']['INPUT_MAP_TOPIC']  ?? 'loxberry/plugin/cantonbar/input_map';
 $cmd_topic    = $plugin_cfg['MQTT']['CMD_TOPIC']        ?? 'loxberry/plugin/cantonbar/cmd';
 $poll_int     = $plugin_cfg['MONITOR']['POLL_INTERVAL'] ?? '5';
 $loglevel     = $plugin_cfg['MONITOR']['LOGLEVEL']      ?? '4';
@@ -125,6 +129,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
     $new_vol_t   = trim($_POST['volume_topic'] ?? $volume_topic);
     $new_mute_t  = trim($_POST['mute_topic']   ?? $mute_topic);
     $new_input_t = trim($_POST['input_topic']  ?? $input_topic);
+    $new_input_name_t = trim($_POST['input_name_topic'] ?? $input_name_topic);
+    $new_input_map_t  = trim($_POST['input_map_topic']  ?? $input_map_topic);
     $new_cmd_t   = trim($_POST['cmd_topic']    ?? $cmd_topic);
     $new_poll    = max(1, min(60, (int)($_POST['poll_int']  ?? 5)));
     $new_ll      = max(1, min(6,  (int)($_POST['loglevel'] ?? 4)));
@@ -154,6 +160,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
     $cfg_content .= "VOLUME_TOPIC=$new_vol_t\n";
     $cfg_content .= "MUTE_TOPIC=$new_mute_t\n";
     $cfg_content .= "INPUT_TOPIC=$new_input_t\n";
+    $cfg_content .= "INPUT_NAME_TOPIC=$new_input_name_t\n";
+    $cfg_content .= "INPUT_MAP_TOPIC=$new_input_map_t\n";
     $cfg_content .= "CMD_TOPIC=$new_cmd_t\n\n";
     $cfg_content .= "[MONITOR]\n";
     $cfg_content .= "POLL_INTERVAL=$new_poll\n";
@@ -179,6 +187,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
         $sb_ip = $new_ip; $sb_mac = $new_mac; $vol_step = $new_step;
         $state_topic = $new_state_t; $volume_topic = $new_vol_t;
         $mute_topic  = $new_mute_t;  $input_topic  = $new_input_t;
+        $input_name_topic = $new_input_name_t; $input_map_topic = $new_input_map_t;
         $cmd_topic   = $new_cmd_t;   $poll_int = $new_poll; $loglevel = $new_ll;
         $status_timeout = $new_status_timeout;
         $recover_threshold = $new_fail_threshold;
@@ -350,6 +359,14 @@ LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
         <div class="form-group row">
             <label class="col-sm-4 col-form-label">Input topic</label>
             <div class="col-sm-8"><input type="text" name="input_topic" class="form-control" value="<?= htmlspecialchars($input_topic) ?>"></div>
+        </div>
+        <div class="form-group row">
+            <label class="col-sm-4 col-form-label">Input name topic</label>
+            <div class="col-sm-8"><input type="text" name="input_name_topic" class="form-control" value="<?= htmlspecialchars($input_name_topic) ?>"></div>
+        </div>
+        <div class="form-group row">
+            <label class="col-sm-4 col-form-label">Input map topic</label>
+            <div class="col-sm-8"><input type="text" name="input_map_topic" class="form-control" value="<?= htmlspecialchars($input_map_topic) ?>"></div>
         </div>
         <div class="form-group row">
             <label class="col-sm-4 col-form-label">Command topic</label>
@@ -528,8 +545,15 @@ function updateStatus() {
                 d.volume !== '-' ? d.volume + '%' : '–';
             document.getElementById('st-mute').textContent =
                 d.mute !== '-' ? (d.mute === 'on' ? 'ON' : 'OFF') : '–';
-            document.getElementById('st-input').textContent =
-                d.input !== '-' ? d.input : '–';
+            if (d.input !== '-') {
+                var inputText = String(d.input);
+                if (d.input_name && d.input_name !== '-' && d.input_name !== inputText) {
+                    inputText += ' (' + d.input_name + ')';
+                }
+                document.getElementById('st-input').textContent = inputText;
+            } else {
+                document.getElementById('st-input').textContent = '–';
+            }
 
             document.getElementById('st-api').innerHTML =
                 '<span class="badge ' + healthBadgeClass(d.api) + ' badge-pill px-3 py-2">' + String(d.api).toUpperCase() + '</span>';
