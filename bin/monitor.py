@@ -306,9 +306,11 @@ def get_soundbar_state() -> dict:
       mute:   "on" | "off"
       input:  str (input source number)
     """
-    state = {"power": "standby", "volume": 0, "mute": "off", "input": "0"}
+    state = {"power": "standby", "volume": 0, "mute": "off", "input": "0", "_api_ok": False}
 
     power_data = api_get("powerstatus")
+    if power_data:
+        state["_api_ok"] = True
     if power_data.get("PowerStatus", "").upper() != "ON":
         return state  # standby — no point polling the rest
 
@@ -551,18 +553,12 @@ def run_poll_loop() -> None:
         poll_interval = _config.getint("MONITOR", "POLL_INTERVAL", fallback=5)
 
         state = get_soundbar_state()
-        if state["power"] == "standby" and state["volume"] == 0 and state["mute"] == "off" and state["input"] == "0":
-            # Could be genuine standby or API down. Confirm by direct powerstatus probe.
-            power_probe = api_get("powerstatus")
-            if power_probe:
-                _api_fail_streak = 0
-                _health["api"] = "up"
-            else:
-                _api_fail_streak += 1
-                _health["api"] = "down"
-        else:
+        if state.get("_api_ok"):
             _api_fail_streak = 0
             _health["api"] = "up"
+        else:
+            _api_fail_streak += 1
+            _health["api"] = "down"
 
         threshold = _config.getint("RECOVERY", "FAILURE_THRESHOLD", fallback=3)
         if _api_fail_streak >= threshold:
