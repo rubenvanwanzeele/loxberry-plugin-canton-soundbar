@@ -100,11 +100,16 @@ def api_get(action: str, timeout: int = 4) -> dict:
     """GET /canton?action=ACTION. Returns parsed JSON dict or {} on error."""
     try:
         r = requests.get(_api_url(), params={"action": action}, timeout=timeout)
+        r.raise_for_status()
         data = r.json()
         log.debug(f"GET {action}: {data}")
         return data
+    except requests.exceptions.JSONDecodeError:
+        body = (r.text or "").strip()[:200] if 'r' in locals() else ""
+        log.warning(f"GET {action} returned non-JSON (HTTP {getattr(r, 'status_code', '?')}): {body!r}")
+        return {}
     except Exception as e:
-        log.debug(f"GET {action} failed: {e}")
+        log.warning(f"GET {action} failed: {type(e).__name__}: {e}")
         return {}
 
 
@@ -113,12 +118,22 @@ def api_post(action: str, body: dict, timeout: int = 4) -> dict:
     try:
         r = requests.post(_api_url(), params={"action": action},
                           json=body, timeout=timeout)
+        r.raise_for_status()
         data = r.json()
         log.debug(f"POST {action} {body}: {data}")
         return data
-    except Exception as e:
-        log.debug(f"POST {action} failed: {e}")
+    except requests.exceptions.JSONDecodeError:
+        body_txt = (r.text or "").strip()[:200] if 'r' in locals() else ""
+        log.warning(f"POST {action} {body} returned non-JSON (HTTP {getattr(r, 'status_code', '?')}): {body_txt!r}")
         return {}
+    except Exception as e:
+        log.warning(f"POST {action} {body} failed: {type(e).__name__}: {e}")
+        return {}
+
+
+def api_ok(result: dict) -> bool:
+    """LibreKNX success response is usually status=101 (ERROR-OK)."""
+    return isinstance(result, dict) and result.get("status") == 101
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +256,12 @@ def handle_command(cmd: str) -> None:
                 log.warning("power_on: no MAC configured for Wake-on-LAN")
 
         elif cmd == "power_off":
+            # Known unverified in NEXT_SESSION: try standby first, then fallback actions.
             result = api_post("standby", {"standby": True})
+            if not api_ok(result):
+                result = api_post("networkstandby", {})
+            if not api_ok(result):
+                result = api_post("poweroff", {})
             log.info(f"Standby: {result}")
 
         elif cmd.startswith("volume_set_"):
@@ -249,6 +269,9 @@ def handle_command(cmd: str) -> None:
                 vol = int(cmd.split("_", 2)[2])
                 vol = max(0, min(100, vol))
                 result = api_post("volume", {"volume": vol})
+                if not api_ok(result):
+                    # Fallback noted in NEXT_SESSION (possible uppercase field name)
+                    result = api_post("volume", {"Volume": vol})
                 log.info(f"Volume set {vol}: {result}")
             except (ValueError, IndexError):
                 log.warning(f"Invalid volume command: {cmd!r}")
@@ -259,6 +282,8 @@ def handle_command(cmd: str) -> None:
             step = _config.getint("SOUNDBAR", "VOLUME_STEP", fallback=5)
             new_vol = min(100, current + step)
             result = api_post("volume", {"volume": new_vol})
+            if not api_ok(result):
+                result = api_post("volume", {"Volume": new_vol})
             log.info(f"Volume up: {current} → {new_vol}: {result}")
 
         elif cmd == "volume_down":
@@ -267,13 +292,21 @@ def handle_command(cmd: str) -> None:
             step = _config.getint("SOUNDBAR", "VOLUME_STEP", fallback=5)
             new_vol = max(0, current - step)
             result = api_post("volume", {"volume": new_vol})
+            if not api_ok(result):
+                result = api_post("volume", {"Volume": new_vol})
             log.info(f"Volume down: {current} → {new_vol}: {result}")
 
         elif cmd == "mute_on":
+            power = api_get("powerstatus").get("PowerStatus", "").upper()
+            if power == "STANDBY":
+                log.warning("mute_on requested while soundbar is STANDBY; command may be ignored by device")
             result = api_post("mute", {"mute": True})
             log.info(f"Mute on: {result}")
 
         elif cmd == "mute_off":
+            power = api_get("powerstatus").get("PowerStatus", "").upper()
+            if power == "STANDBY":
+                log.warning("mute_off requested while soundbar is STANDBY; command may be ignored by device")
             result = api_post("mute", {"mute": False})
             log.info(f"Mute off: {result}")
 
@@ -285,7 +318,10 @@ def handle_command(cmd: str) -> None:
 
         elif cmd.startswith("input_"):
             source = cmd[6:]  # "input_3" → "3"
-            result = api_post("input", {"inputsource": source})
+            # Try capitalized key first (as hinted by NEXT_SESSION), then lowercase fallback.
+            result = api_post("input", {"InputSource": source})
+            if not api_ok(result):
+                result = api_post("input", {"inputsource": source})
             log.info(f"Input → {source!r}: {result}")
 
         else:

@@ -213,37 +213,29 @@ LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
         <small class="text-muted">Auto-refreshes every 5&thinsp;s &nbsp;&bull;&nbsp; Last updated: <span id="st-time">–</span></small>
     </div>
     <div class="card-body">
-        <div class="row text-center">
-            <div class="col-3">
-                <div class="card border-0 bg-light">
-                    <div class="card-body py-3">
-                        <div class="small text-muted text-uppercase mb-1">Power</div>
-                        <div class="h5 mb-0" id="st-state"><span class="badge badge-secondary">…</span></div>
-                    </div>
+        <div class="row">
+            <div class="col-md-6 mb-2 mb-md-0">
+                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
+                    <strong>Power</strong>
+                    <span id="st-state"><span class="badge badge-secondary">unknown</span></span>
                 </div>
             </div>
-            <div class="col-3">
-                <div class="card border-0 bg-light">
-                    <div class="card-body py-3">
-                        <div class="small text-muted text-uppercase mb-1">Volume</div>
-                        <div class="h5 mb-0" id="st-volume">…</div>
-                    </div>
+            <div class="col-md-6 mb-2 mb-md-0">
+                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
+                    <strong>Volume</strong>
+                    <span class="font-weight-bold" id="st-volume">–</span>
                 </div>
             </div>
-            <div class="col-3">
-                <div class="card border-0 bg-light">
-                    <div class="card-body py-3">
-                        <div class="small text-muted text-uppercase mb-1">Mute</div>
-                        <div class="h5 mb-0" id="st-mute">…</div>
-                    </div>
+            <div class="col-md-6 mt-md-2 mb-2 mb-md-0">
+                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
+                    <strong>Mute</strong>
+                    <span class="font-weight-bold" id="st-mute">–</span>
                 </div>
             </div>
-            <div class="col-3">
-                <div class="card border-0 bg-light">
-                    <div class="card-body py-3">
-                        <div class="small text-muted text-uppercase mb-1">Input</div>
-                        <div class="h5 mb-0" id="st-input">…</div>
-                    </div>
+            <div class="col-md-6 mt-md-2">
+                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
+                    <strong>Input</strong>
+                    <span class="font-weight-bold" id="st-input">–</span>
                 </div>
             </div>
         </div>
@@ -398,11 +390,11 @@ function updateStatus() {
             var cls = s === 'on'      ? 'badge-success' :
                       s === 'standby' ? 'badge-warning'  : 'badge-secondary';
             document.getElementById('st-state').innerHTML =
-                '<span class="badge ' + cls + ' badge-pill px-3 py-2">' + s + '</span>';
+                '<span class="badge ' + cls + ' badge-pill px-3 py-2">' + s.toUpperCase() + '</span>';
             document.getElementById('st-volume').textContent =
                 d.volume !== '-' ? d.volume + '%' : '–';
             document.getElementById('st-mute').textContent =
-                d.mute !== '-' ? (d.mute === 'on' ? '🔇 on' : '🔊 off') : '–';
+                d.mute !== '-' ? (d.mute === 'on' ? 'ON' : 'OFF') : '–';
             document.getElementById('st-input').textContent =
                 d.input !== '-' ? d.input : '–';
             document.getElementById('st-time').textContent = d.updated;
