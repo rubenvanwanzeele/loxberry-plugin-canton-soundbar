@@ -144,3 +144,77 @@ Needs investigation to map numbers to: HDMI ARC, AUX, Bluetooth, Optical, etc.
   for volume. ADB is a fallback only — not used in production daemon.
 - **AirPlay** (port 7000): AirTunes/366.0 — media playback only.
 - **UPnP** (port 80): description.xml present, control endpoints return 404.
+
+---
+
+## LoxBerry 3 Plugin Development — Key Rules
+
+Learned from building the Samsung Frame TV plugin. Violating these causes silent failures.
+
+### Directory structure — NO doubling
+
+LoxBerry prepends `plugins/FOLDER/` to every path automatically. Never add an
+extra `cantonbar/` subfolder inside `bin/`, `config/`, `webfrontend/htmlauth/`, or `templates/`.
+
+| Repo path                          | Installed path                                      |
+|------------------------------------|-----------------------------------------------------|
+| `bin/monitor.py`                   | `/opt/loxberry/bin/plugins/cantonbar/monitor.py`    |
+| `config/cantonbar.cfg`             | `/opt/loxberry/config/plugins/cantonbar/cantonbar.cfg` |
+| `webfrontend/htmlauth/index.php`   | `/opt/loxberry/webfrontend/htmlauth/plugins/cantonbar/index.php` |
+| `templates/lang/en.json`           | `/opt/loxberry/templates/plugins/cantonbar/lang/en.json` |
+
+Variables available in shell scripts and PHP:
+- `$LBPBIN` = `/opt/loxberry/bin/plugins/cantonbar`
+- `$LBPCONFIG` = `/opt/loxberry/config/plugins/cantonbar`
+- `$LBPLOG` = `/opt/loxberry/log/plugins/cantonbar`
+
+### PHP — reserved variable name
+
+LoxBerry's `loxberry_system.php` declares a global `$cfg` (stdClass). **Never use `$cfg`
+for your own config** — it will silently break. Use `$plugin_cfg` or any other name.
+
+### MQTT credentials
+
+Not in a plugin config file. Read from `/opt/loxberry/config/system/general.json`
+under `Mqtt.Brokerhost`, `Mqtt.Brokerport`, `Mqtt.Brokeruser`, `Mqtt.Brokerpass`.
+In PHP: `mqtt_connectiondetails()` from `loxberry_io.php`.
+In Python (as used in `bin/monitor.py`): parse the JSON directly.
+
+### No daemon/ scripts in LoxBerry 3
+
+LoxBerry 3 runs on DietPi (systemd). There is no `daemon/` mechanism.
+Use `postroot.sh` to create a systemd service instead (as this plugin does).
+
+### postroot.sh vs postinstall.sh
+
+- `postroot.sh` runs as **root** — use for systemd, sudoers, system-level setup.
+- `postinstall.sh` runs as the **loxberry user** — use for pip installs, file setup.
+
+### Config is overwritten on every install/upgrade
+
+LoxBerry replaces plugin config files on every install. The `preupgrade.sh` /
+`postupgrade.sh` scripts back up and restore `cantonbar.cfg` to preserve user settings.
+
+### 4 icon sizes required
+
+`icon_64.png`, `icon_128.png`, `icon_256.png`, `icon_512.png` — all must exist.
+Missing sizes cause install warnings (currently using placeholder icons).
+
+### Blank PHP page = suppressed fatal error
+
+Add at the top of `index.php` for debugging:
+```php
+error_reporting(E_ALL); ini_set('display_errors', 1);
+```
+Remove before release.
+
+### journalctl not available
+
+The `loxberry` user has no journal read access. Always use file-based logging
+(the daemon writes to `$LBPLOG/monitor.log` via Python's RotatingFileHandler).
+
+### sudoers file
+
+To allow the `loxberry` user to run `systemctl` for the plugin service,
+a sudoers file is provided at `sudoers/cantonbar`. LoxBerry installs it to
+`/etc/sudoers.d/cantonbar` automatically.
