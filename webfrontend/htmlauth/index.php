@@ -142,7 +142,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
     $new_enable_input_switching = isset($_POST['enable_input_switching']) ? 1 : 0;
     $new_enable_unsafe_http_input = isset($_POST['enable_unsafe_http_input']) ? 1 : 0;
 
-    // Keep MAC empty if user leaves it blank; do not auto-fill from ARP.
+    // Normalize manually entered MAC.
+    if ($new_mac !== '') {
+        $new_mac = strtoupper(str_replace('-', ':', $new_mac));
+    }
+
+    // Auto-fill MAC from the device's own API (safer than ARP, which can return unrelated MACs).
+    if ($new_mac === '' && $new_ip !== '') {
+        $ctx = stream_context_create(['http' => ['timeout' => 2]]);
+        $info_raw = @file_get_contents("http://$new_ip:1904/canton?action=info", false, $ctx);
+        if ($info_raw !== false) {
+            $info_json = @json_decode($info_raw, true);
+            $api_mac = $info_json['MACAddress'] ?? '';
+            if (is_string($api_mac) && preg_match('/^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/i', $api_mac)) {
+                $new_mac = strtoupper($api_mac);
+            }
+        }
+    }
 
     // NOTE: named $cfg_content — never use $cfg (reserved by LoxBerry SDK for its own global)
     $cfg_content  = "[SOUNDBAR]\n";
