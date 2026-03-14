@@ -66,6 +66,11 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'status') {
     $volume_t   = $plugin_cfg['MQTT']['VOLUME_TOPIC'] ?? 'loxberry/plugin/cantonbar/volume';
     $mute_t     = $plugin_cfg['MQTT']['MUTE_TOPIC']   ?? 'loxberry/plugin/cantonbar/mute';
     $input_t    = $plugin_cfg['MQTT']['INPUT_TOPIC']  ?? 'loxberry/plugin/cantonbar/input';
+    $health_base = $plugin_cfg['MQTT']['HEALTH_BASE_TOPIC'] ?? 'loxberry/plugin/cantonbar/health';
+    $api_health_t = $plugin_cfg['MQTT']['API_HEALTH_TOPIC'] ?? ($health_base . '/api');
+    $adb_health_t = $plugin_cfg['MQTT']['ADB_HEALTH_TOPIC'] ?? ($health_base . '/adb');
+    $libreknx_health_t = $plugin_cfg['MQTT']['LIBREKNX_HEALTH_TOPIC'] ?? ($health_base . '/libreknx');
+    $token_health_t = $plugin_cfg['MQTT']['TOKEN_HEALTH_TOPIC'] ?? ($health_base . '/token');
 
     $mq = get_mqtt_details();
     echo json_encode([
@@ -73,6 +78,10 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'status') {
         'volume'  => mqsub($mq, $volume_t) ?: '-',
         'mute'    => mqsub($mq, $mute_t)   ?: '-',
         'input'   => mqsub($mq, $input_t)  ?: '-',
+        'api'     => mqsub($mq, $api_health_t) ?: 'unknown',
+        'adb'     => mqsub($mq, $adb_health_t) ?: 'unknown',
+        'libreknx'=> mqsub($mq, $libreknx_health_t) ?: 'unknown',
+        'token'   => mqsub($mq, $token_health_t) ?: 'unknown',
         'updated' => date('H:i:s'),
     ]);
     exit;
@@ -92,6 +101,9 @@ $input_topic  = $plugin_cfg['MQTT']['INPUT_TOPIC']      ?? 'loxberry/plugin/cant
 $cmd_topic    = $plugin_cfg['MQTT']['CMD_TOPIC']        ?? 'loxberry/plugin/cantonbar/cmd';
 $poll_int     = $plugin_cfg['MONITOR']['POLL_INTERVAL'] ?? '5';
 $loglevel     = $plugin_cfg['MONITOR']['LOGLEVEL']      ?? '4';
+$recover_threshold = $plugin_cfg['RECOVERY']['FAILURE_THRESHOLD'] ?? '3';
+$recover_cooldown  = $plugin_cfg['RECOVERY']['COOLDOWN_SECONDS']  ?? '90';
+$token_action      = $plugin_cfg['RECOVERY']['TOKEN_ACTION']      ?? '';
 
 $save_msg = '';
 $save_ok  = true;
@@ -112,6 +124,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
     $new_cmd_t   = trim($_POST['cmd_topic']    ?? $cmd_topic);
     $new_poll    = max(1, min(60, (int)($_POST['poll_int']  ?? 5)));
     $new_ll      = max(1, min(6,  (int)($_POST['loglevel'] ?? 4)));
+    $new_fail_threshold = max(1, min(20, (int)($_POST['recover_threshold'] ?? 3)));
+    $new_cooldown = max(10, min(3600, (int)($_POST['recover_cooldown'] ?? 90)));
+    $new_token_action = trim($_POST['token_action'] ?? '');
 
     // Auto-discover MAC via ARP if left blank
     if (empty($new_mac) && !empty($new_ip)) {
@@ -134,7 +149,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
     $cfg_content .= "CMD_TOPIC=$new_cmd_t\n\n";
     $cfg_content .= "[MONITOR]\n";
     $cfg_content .= "POLL_INTERVAL=$new_poll\n";
-    $cfg_content .= "LOGLEVEL=$new_ll\n";
+    $cfg_content .= "LOGLEVEL=$new_ll\n\n";
+    $cfg_content .= "[RECOVERY]\n";
+    $cfg_content .= "FAILURE_THRESHOLD=$new_fail_threshold\n";
+    $cfg_content .= "COOLDOWN_SECONDS=$new_cooldown\n";
+    $cfg_content .= "TOKEN_ACTION=$new_token_action\n";
 
     @mkdir($lbpconfigdir, 0755, true);
     $written = file_put_contents("$lbpconfigdir/cantonbar.cfg", $cfg_content);
@@ -148,6 +167,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
         $state_topic = $new_state_t; $volume_topic = $new_vol_t;
         $mute_topic  = $new_mute_t;  $input_topic  = $new_input_t;
         $cmd_topic   = $new_cmd_t;   $poll_int = $new_poll; $loglevel = $new_ll;
+        $recover_threshold = $new_fail_threshold;
+        $recover_cooldown = $new_cooldown;
+        $token_action = $new_token_action;
         $save_msg = "Configuration saved. Daemon restarted.";
     }
 }
@@ -238,6 +260,30 @@ LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
                     <span class="font-weight-bold" id="st-input">–</span>
                 </div>
             </div>
+            <div class="col-md-6 mt-md-2">
+                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
+                    <strong>API</strong>
+                    <span id="st-api"><span class="badge badge-secondary">unknown</span></span>
+                </div>
+            </div>
+            <div class="col-md-6 mt-md-2">
+                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
+                    <strong>ADB</strong>
+                    <span id="st-adb"><span class="badge badge-secondary">unknown</span></span>
+                </div>
+            </div>
+            <div class="col-md-6 mt-md-2">
+                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
+                    <strong>LibreKNX</strong>
+                    <span id="st-libreknx"><span class="badge badge-secondary">unknown</span></span>
+                </div>
+            </div>
+            <div class="col-md-6 mt-md-2">
+                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
+                    <strong>Token</strong>
+                    <span id="st-token"><span class="badge badge-secondary">unknown</span></span>
+                </div>
+            </div>
         </div>
     </div>
 </div>
@@ -312,6 +358,27 @@ LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
                 <small class="form-text text-muted">Change takes effect after daemon restart.</small>
             </div>
         </div>
+        <div class="form-group row">
+            <label class="col-sm-4 col-form-label">API failure threshold</label>
+            <div class="col-sm-2">
+                <input type="number" name="recover_threshold" class="form-control" value="<?= (int)$recover_threshold ?>" min="1" max="20">
+            </div>
+            <div class="col-sm-6"><small class="form-text text-muted">How many failed API checks before auto-recovery via ADB.</small></div>
+        </div>
+        <div class="form-group row">
+            <label class="col-sm-4 col-form-label">Recovery cooldown (s)</label>
+            <div class="col-sm-2">
+                <input type="number" name="recover_cooldown" class="form-control" value="<?= (int)$recover_cooldown ?>" min="10" max="3600">
+            </div>
+            <div class="col-sm-6"><small class="form-text text-muted">Minimum delay between recovery attempts.</small></div>
+        </div>
+        <div class="form-group row">
+            <label class="col-sm-4 col-form-label">Token action</label>
+            <div class="col-sm-4">
+                <input type="text" name="token_action" class="form-control" value="<?= htmlspecialchars($token_action) ?>" placeholder="optional, e.g. token">
+                <small class="form-text text-muted">If set, daemon calls this action after recovery/start and stores token health status.</small>
+            </div>
+        </div>
 
         <button type="submit" class="btn btn-primary">Save Configuration</button>
         </form>
@@ -382,6 +449,13 @@ if (file_exists($logfile) && filesize($logfile) > 0) {
 </div><!-- /container-fluid -->
 
 <script>
+function healthBadgeClass(v) {
+    if (v === 'up' || v === 'running' || v === 'connected' || v === 'ok') return 'badge-success';
+    if (v === 'disabled') return 'badge-info';
+    if (v === 'unknown') return 'badge-secondary';
+    return 'badge-danger';
+}
+
 function updateStatus() {
     fetch('index.php?ajax=status&_=' + Date.now())
         .then(function(r) { return r.json(); })
@@ -397,6 +471,16 @@ function updateStatus() {
                 d.mute !== '-' ? (d.mute === 'on' ? 'ON' : 'OFF') : '–';
             document.getElementById('st-input').textContent =
                 d.input !== '-' ? d.input : '–';
+
+            document.getElementById('st-api').innerHTML =
+                '<span class="badge ' + healthBadgeClass(d.api) + ' badge-pill px-3 py-2">' + String(d.api).toUpperCase() + '</span>';
+            document.getElementById('st-adb').innerHTML =
+                '<span class="badge ' + healthBadgeClass(d.adb) + ' badge-pill px-3 py-2">' + String(d.adb).toUpperCase() + '</span>';
+            document.getElementById('st-libreknx').innerHTML =
+                '<span class="badge ' + healthBadgeClass(d.libreknx) + ' badge-pill px-3 py-2">' + String(d.libreknx).toUpperCase() + '</span>';
+            document.getElementById('st-token').innerHTML =
+                '<span class="badge ' + healthBadgeClass(d.token) + ' badge-pill px-3 py-2">' + String(d.token).toUpperCase() + '</span>';
+
             document.getElementById('st-time').textContent = d.updated;
         })
         .catch(function() {});

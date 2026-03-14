@@ -26,6 +26,8 @@ import json
 import logging
 import os
 import signal
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -56,6 +58,23 @@ _config: configparser.ConfigParser = None
 _mqtt_client: mqtt.Client = None
 _shutdown = threading.Event()
 _api_lock = threading.Lock()
+
+# Health / recovery runtime state
+_api_fail_streak = 0
+_last_recovery_ts = 0.0
+_health = {
+    "api": "unknown",
+    "adb": "unknown",
+    "libreknx": "unknown",
+    "token": "unknown",
+    "token_value": "",
+}
+_last_health_pub = {
+    "api": "",
+    "adb": "",
+    "libreknx": "",
+    "token": "",
+}
 
 # Last published values — only publish on change
 _last_state: str = ""
@@ -137,6 +156,142 @@ def api_post(action: str, body: dict, timeout: int = 4) -> dict:
 def api_ok(result: dict) -> bool:
     """LibreKNX success response is usually status=101 (ERROR-OK)."""
     return isinstance(result, dict) and result.get("status") == 101
+
+
+def _run_cmd(cmd: list[str], timeout: int = 8) -> tuple[int, str, str]:
+    try:
+        cp = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return cp.returncode, (cp.stdout or "").strip(), (cp.stderr or "").strip()
+    except Exception as e:
+        return 1, "", f"{type(e).__name__}: {e}"
+
+
+def _health_topics() -> dict:
+    base = _config.get("MQTT", "HEALTH_BASE_TOPIC", fallback="loxberry/plugin/cantonbar/health")
+    return {
+        "api": _config.get("MQTT", "API_HEALTH_TOPIC", fallback=f"{base}/api"),
+        "adb": _config.get("MQTT", "ADB_HEALTH_TOPIC", fallback=f"{base}/adb"),
+        "libreknx": _config.get("MQTT", "LIBREKNX_HEALTH_TOPIC", fallback=f"{base}/libreknx"),
+        "token": _config.get("MQTT", "TOKEN_HEALTH_TOPIC", fallback=f"{base}/token"),
+    }
+
+
+def publish_health(force: bool = False) -> None:
+    topics = _health_topics()
+    for key in ("api", "adb", "libreknx", "token"):
+        val = _health.get(key, "unknown")
+        if force or _last_health_pub.get(key) != val:
+            _publish(topics[key], val)
+            _last_health_pub[key] = val
+
+
+def _adb_binary() -> str:
+    return shutil.which("adb") or ""
+
+
+def _adb_connect(ip: str) -> bool:
+    adb = _adb_binary()
+    if not adb:
+        _health["adb"] = "unavailable"
+        log.warning("ADB binary not found on system; cannot auto-recover LibreKNX")
+        return False
+
+    rc, out, err = _run_cmd([adb, "connect", f"{ip}:5555"], timeout=10)
+    txt = f"{out} {err}".lower()
+    if rc == 0 and ("connected" in txt or "already connected" in txt):
+        _health["adb"] = "connected"
+        return True
+
+    _health["adb"] = "failed"
+    log.warning(f"ADB connect failed: rc={rc}, out={out!r}, err={err!r}")
+    return False
+
+
+def _is_libreknx_running(ip: str) -> bool:
+    adb = _adb_binary()
+    if not adb:
+        return False
+    cmd = [adb, "-s", f"{ip}:5555", "shell", "ps | grep -F LibreKNX | grep -v grep"]
+    rc, out, err = _run_cmd(cmd, timeout=8)
+    if rc == 0 and out:
+        _health["libreknx"] = "running"
+        return True
+    if err and "device offline" in err.lower():
+        _health["adb"] = "failed"
+    _health["libreknx"] = "down"
+    return False
+
+
+def _start_libreknx(ip: str) -> bool:
+    adb = _adb_binary()
+    if not adb:
+        return False
+
+    cmd = [adb, "-s", f"{ip}:5555", "shell", "sh -c '/system/bin/LibreKNX >/dev/null 2>&1 &'"]
+    rc, out, err = _run_cmd(cmd, timeout=8)
+    if rc != 0:
+        log.warning(f"Failed to start LibreKNX via ADB: rc={rc}, out={out!r}, err={err!r}")
+        _health["libreknx"] = "start_failed"
+        return False
+
+    time.sleep(2)
+    return _is_libreknx_running(ip)
+
+
+def refresh_api_token() -> None:
+    token_action = _config.get("RECOVERY", "TOKEN_ACTION", fallback="").strip()
+    if not token_action:
+        _health["token"] = "disabled"
+        return
+
+    token_data = api_get(token_action)
+    if not token_data:
+        _health["token"] = "error"
+        return
+
+    token_value = ""
+    for key in ("token", "Token", "apiToken", "ApiToken", "access_token", "accessToken"):
+        value = token_data.get(key)
+        if isinstance(value, str) and value.strip():
+            token_value = value.strip()
+            break
+
+    if token_value:
+        _health["token_value"] = token_value
+        _health["token"] = "ok"
+        log.warning("API token refreshed successfully")
+    else:
+        _health["token"] = "missing"
+
+
+def maybe_recover_libreknx() -> None:
+    global _last_recovery_ts
+
+    cooldown = _config.getint("RECOVERY", "COOLDOWN_SECONDS", fallback=90)
+    now = time.time()
+    if now - _last_recovery_ts < cooldown:
+        return
+    _last_recovery_ts = now
+
+    ip = _config.get("SOUNDBAR", "IP", fallback="").strip()
+    if not ip:
+        return
+
+    log.warning("LibreKNX API appears down; attempting ADB-based recovery")
+    if not _adb_connect(ip):
+        publish_health()
+        return
+
+    if _is_libreknx_running(ip):
+        log.warning("ADB connected and LibreKNX process already running; waiting for API to recover")
+        publish_health()
+        return
+
+    if _start_libreknx(ip):
+        log.warning("LibreKNX restarted via ADB")
+    else:
+        log.warning("LibreKNX restart via ADB failed")
+    publish_health()
 
 
 # ---------------------------------------------------------------------------
@@ -385,8 +540,10 @@ def setup_mqtt() -> mqtt.Client:
 # ---------------------------------------------------------------------------
 
 def run_poll_loop() -> None:
+    global _api_fail_streak
     poll_interval = _config.getint("MONITOR", "POLL_INTERVAL", fallback=5)
     log.info(f"Starting poll loop (interval={poll_interval}s)")
+    publish_health(force=True)
 
     while not _shutdown.is_set():
         config_path = _config.get("_meta", "config_path")
@@ -394,7 +551,28 @@ def run_poll_loop() -> None:
         poll_interval = _config.getint("MONITOR", "POLL_INTERVAL", fallback=5)
 
         state = get_soundbar_state()
+        if state["power"] == "standby" and state["volume"] == 0 and state["mute"] == "off" and state["input"] == "0":
+            # Could be genuine standby or API down. Confirm by direct powerstatus probe.
+            power_probe = api_get("powerstatus")
+            if power_probe:
+                _api_fail_streak = 0
+                _health["api"] = "up"
+            else:
+                _api_fail_streak += 1
+                _health["api"] = "down"
+        else:
+            _api_fail_streak = 0
+            _health["api"] = "up"
+
+        threshold = _config.getint("RECOVERY", "FAILURE_THRESHOLD", fallback=3)
+        if _api_fail_streak >= threshold:
+            maybe_recover_libreknx()
+
+        if _health["api"] == "up":
+            refresh_api_token()
+
         publish_state(state)
+        publish_health()
 
         _shutdown.wait(timeout=poll_interval)
 
@@ -443,6 +621,8 @@ def main() -> None:
         time.sleep(0.5)
     else:
         log.warning("MQTT did not connect within 10s — continuing anyway")
+
+    refresh_api_token()
 
     try:
         run_poll_loop()
