@@ -9,6 +9,7 @@ echo "<OK> Python dependencies installed."
 if command -v adb >/dev/null 2>&1; then
 	echo "<OK> adb detected ($(command -v adb))"
 else
-	echo "<WARNING> adb not found. LibreKNX auto-recovery will stay unavailable until android-tools-adb is installed."
+	echo "<WARNING> adb not found in postinstall check."
+	echo "<WARNING> Root phase should install it; if still missing run: sudo apt install -y android-tools-adb"
 fi
 exit 0

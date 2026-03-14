@@ -21,6 +21,8 @@ echo "<OK> Python dependencies re-installed."
 if command -v adb >/dev/null 2>&1; then
     echo "<OK> adb detected ($(command -v adb))"
 else
-    echo "<WARNING> adb not found. LibreKNX auto-recovery will stay unavailable until android-tools-adb is installed."
+    echo "<WARNING> adb not found in postupgrade check."
+    echo "<WARNING> This script runs as loxberry and cannot apt-install system packages."
+    echo "<WARNING> Install manually: sudo apt install -y android-tools-adb"
 fi
 exit 0
