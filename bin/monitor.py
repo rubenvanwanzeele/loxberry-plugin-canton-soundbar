@@ -424,6 +424,18 @@ def _wait_for_api(ip: str, retries: int = 8, delay_s: int = 2) -> bool:
     return False
 
 
+def _send_luci_local(ip: str, mid: int, payload: str) -> bool:
+    adb = _adb_binary()
+    if not adb:
+        return False
+    cmd = [adb, "-s", f"{ip}:5555", "shell", "LUCI_local", str(mid), payload]
+    rc, out, err = _run_cmd(cmd, timeout=8)
+    ok = rc == 0 and "done local write" in (out or "").lower()
+    if not ok:
+        log.warning(f"LUCI_local send failed (mid={mid}, payload={payload!r}): rc={rc}, out={out!r}, err={err!r}")
+    return ok
+
+
 def refresh_api_token() -> None:
     token_action = _config.get("RECOVERY", "TOKEN_ACTION", fallback="").strip()
     if not token_action:
@@ -655,6 +667,7 @@ def on_mqtt_message(client, userdata, msg) -> None:
 
 def handle_command(cmd: str) -> None:
     mac = _config.get("SOUNDBAR", "MAC", fallback="")
+    ip = _config.get("SOUNDBAR", "IP", fallback="").strip()
 
     try:
         started = time.time()
@@ -667,23 +680,33 @@ def handle_command(cmd: str) -> None:
                 _trace_publish("error", payload, retain=True)
 
         if cmd == "power_on":
-            wol_mac = resolve_wol_mac()
-            if wol_mac:
-                wakeonlan.send_magic_packet(wol_mac)
-                log.info(f"Wake-on-LAN sent to {wol_mac}")
-                cmd_done(True, {"action": "wol", "mac": wol_mac})
+            # Prefer the verified internal standby-off control path via LUCI.
+            if ip and _adb_connect(ip) and _send_luci_local(ip, 70, "STANDBYOFF"):
+                log.info("Power on requested via LUCI STANDBYOFF")
+                cmd_done(True, {"action": "adb_standbyoff"})
             else:
-                log.warning("power_on: no MAC configured for Wake-on-LAN")
-                cmd_done(False, {"action": "wol", "error": "no_mac_configured"})
+                wol_mac = resolve_wol_mac()
+                if wol_mac:
+                    wakeonlan.send_magic_packet(wol_mac)
+                    log.info(f"Wake-on-LAN sent to {wol_mac}")
+                    cmd_done(True, {"action": "wol", "mac": wol_mac})
+                else:
+                    log.warning("power_on failed: LUCI standby-off unavailable and no valid MAC for WoL")
+                    cmd_done(False, {"action": "power_on", "error": "no_luci_no_wol_mac"})
 
         elif cmd == "power_off":
             if not _config.getboolean("EXPERIMENTAL", "ENABLE_POWER_OFF", fallback=False):
                 log.warning("power_off ignored: network standby is not verified for this device and is disabled by default")
                 cmd_done(False, {"action": "standby", "error": "disabled_by_config"})
                 return
-            result = api_post("standby", {"standby": True})
-            log.info(f"Standby: {result}")
-            cmd_done(api_ok(result), {"action": "standby", "response": result})
+            if ip and _adb_connect(ip) and _send_luci_local(ip, 70, "STANDBYON"):
+                log.info("Standby requested via LUCI STANDBYON")
+                cmd_done(True, {"action": "adb_standbyon"})
+            else:
+                # Last resort: legacy HTTP standby (known unreliable on this firmware).
+                result = api_post("standby", {"standby": True})
+                log.info(f"Standby (HTTP fallback): {result}")
+                cmd_done(api_ok(result), {"action": "standby_http_fallback", "response": result})
 
         elif cmd.startswith("volume_set_"):
             try:
