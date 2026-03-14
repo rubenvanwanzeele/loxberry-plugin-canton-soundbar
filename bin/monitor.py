@@ -227,15 +227,42 @@ def _start_libreknx(ip: str) -> bool:
     if not adb:
         return False
 
-    cmd = [adb, "-s", f"{ip}:5555", "shell", "sh -c '/system/bin/LibreKNX >/dev/null 2>&1 &'"]
+    # Method 1: detached remote launch that should survive shell exit.
+    cmd = [
+        adb,
+        "-s",
+        f"{ip}:5555",
+        "shell",
+        "sh -c 'nohup /system/bin/LibreKNX >/dev/null 2>&1 </dev/null &'",
+    ]
     rc, out, err = _run_cmd(cmd, timeout=8)
-    if rc != 0:
-        log.warning(f"Failed to start LibreKNX via ADB: rc={rc}, out={out!r}, err={err!r}")
+    if rc == 0:
+        time.sleep(2)
+        if _wait_for_api(ip, retries=3, delay_s=1) or _is_libreknx_running(ip):
+            return True
+
+    log.warning(f"Detached LibreKNX start via adb shell did not recover API yet: rc={rc}, out={out!r}, err={err!r}")
+
+    # Method 2: keep a dedicated adb client alive with LibreKNX in foreground.
+    # This is heavier, but more reliable on devices where the remote shell kills background jobs.
+    try:
+        subprocess.Popen(
+            [adb, "-s", f"{ip}:5555", "shell", "/system/bin/LibreKNX"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:
+        log.warning(f"Failed to spawn persistent adb client for LibreKNX: {type(e).__name__}: {e}")
         _health["libreknx"] = "start_failed"
         return False
 
-    time.sleep(2)
-    return _is_libreknx_running(ip)
+    time.sleep(3)
+    ok = _wait_for_api(ip, retries=3, delay_s=1) or _is_libreknx_running(ip)
+    if not ok:
+        _health["libreknx"] = "start_failed"
+    return ok
 
 
 def _stop_libreknx(ip: str) -> bool:
