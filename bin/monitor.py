@@ -316,7 +316,16 @@ def get_mqtt_connection() -> tuple:
 
 
 def setup_mqtt() -> mqtt.Client:
-    client = mqtt.Client(client_id="cantonbar-monitor", clean_session=True)
+    try:
+        # paho-mqtt 2.x
+        client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION1,
+            client_id="cantonbar-monitor",
+            clean_session=True,
+        )
+    except AttributeError:
+        # paho-mqtt 1.x
+        client = mqtt.Client(client_id="cantonbar-monitor", clean_session=True)
     client.on_connect = on_mqtt_connect
     client.on_disconnect = on_mqtt_disconnect
     client.on_message = on_mqtt_message
@@ -375,12 +384,17 @@ def main() -> None:
         _config.add_section("_meta")
     _config.set("_meta", "config_path", args.config)
 
-    loglevel = _config.getint("MONITOR", "LOGLEVEL", fallback=3)
+    loglevel = _config.getint("MONITOR", "LOGLEVEL", fallback=4)
     setup_logging(args.logfile, loglevel)
 
-    log.info("Canton Smart Soundbar monitor starting")
-    log.info(f"Config: {args.config}")
-    log.info(f"Soundbar IP: {_config.get('SOUNDBAR', 'IP', fallback='(not set)')}")
+    log.warning("Canton Smart Soundbar monitor starting")
+    log.info(f"Config: {args.config}  |  Log level: {loglevel}")
+
+    ip = _config.get("SOUNDBAR", "IP", fallback="").strip()
+    if not ip:
+        log.warning("Soundbar IP is not configured — HTTP commands will fail. Set IP in the web UI.")
+    else:
+        log.info(f"Soundbar IP: {ip}")
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
