@@ -142,13 +142,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
     $new_enable_input_switching = isset($_POST['enable_input_switching']) ? 1 : 0;
     $new_enable_unsafe_http_input = isset($_POST['enable_unsafe_http_input']) ? 1 : 0;
 
-    // Auto-discover MAC via ARP if left blank
-    if (empty($new_mac) && !empty($new_ip)) {
-        $arp_out = shell_exec("arp -n " . escapeshellarg($new_ip) . " 2>/dev/null");
-        if (preg_match('/([0-9a-f]{2}(?::[0-9a-f]{2}){5})/i', $arp_out, $m)) {
-            $new_mac = $m[1];
-        }
-    }
+    // Keep MAC empty if user leaves it blank; do not auto-fill from ARP.
 
     // NOTE: named $cfg_content — never use $cfg (reserved by LoxBerry SDK for its own global)
     $cfg_content  = "[SOUNDBAR]\n";
