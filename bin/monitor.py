@@ -169,6 +169,38 @@ def api_ok(result: dict) -> bool:
     return isinstance(result, dict) and result.get("status") == 101
 
 
+def _normalize_mac(mac: str) -> str:
+    return (mac or "").strip().replace("-", ":").upper()
+
+
+def _is_valid_mac(mac: str) -> bool:
+    mac = _normalize_mac(mac)
+    parts = mac.split(":")
+    if len(parts) != 6:
+        return False
+    try:
+        return all(len(p) == 2 and 0 <= int(p, 16) <= 255 for p in parts)
+    except ValueError:
+        return False
+
+
+def resolve_wol_mac() -> str:
+    """Resolve best MAC for WoL, preferring soundbar-reported MAC when available."""
+    configured = _normalize_mac(_config.get("SOUNDBAR", "MAC", fallback=""))
+    info = api_get("info", timeout=2)
+    api_mac = _normalize_mac(str(info.get("MACAddress", ""))) if info else ""
+
+    if _is_valid_mac(api_mac):
+        if configured and configured != api_mac:
+            log.warning(f"Configured MAC {configured} differs from device MAC {api_mac}; using device MAC")
+        return api_mac
+
+    if _is_valid_mac(configured):
+        return configured
+
+    return ""
+
+
 def set_volume_override(volume: int) -> None:
     global _volume_override, _volume_override_ts
     _volume_override = max(0, min(100, int(volume)))
@@ -635,10 +667,11 @@ def handle_command(cmd: str) -> None:
                 _trace_publish("error", payload, retain=True)
 
         if cmd == "power_on":
-            if mac:
-                wakeonlan.send_magic_packet(mac)
-                log.info(f"Wake-on-LAN sent to {mac}")
-                cmd_done(True, {"action": "wol", "mac": mac})
+            wol_mac = resolve_wol_mac()
+            if wol_mac:
+                wakeonlan.send_magic_packet(wol_mac)
+                log.info(f"Wake-on-LAN sent to {wol_mac}")
+                cmd_done(True, {"action": "wol", "mac": wol_mac})
             else:
                 log.warning("power_on: no MAC configured for Wake-on-LAN")
                 cmd_done(False, {"action": "wol", "error": "no_mac_configured"})
