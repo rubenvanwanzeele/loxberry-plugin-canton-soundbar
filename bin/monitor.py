@@ -238,6 +238,39 @@ def _start_libreknx(ip: str) -> bool:
     return _is_libreknx_running(ip)
 
 
+def _stop_libreknx(ip: str) -> bool:
+    adb = _adb_binary()
+    if not adb:
+        return False
+
+    # Best-effort stop; some builds may not have pkill/killall.
+    cmd = [
+        adb,
+        "-s",
+        f"{ip}:5555",
+        "shell",
+        "sh -c 'pkill -f LibreKNX >/dev/null 2>&1 || killall LibreKNX >/dev/null 2>&1 || true'",
+    ]
+    _run_cmd(cmd, timeout=8)
+    time.sleep(1)
+    return not _is_libreknx_running(ip)
+
+
+def _wait_for_api(ip: str, retries: int = 8, delay_s: int = 2) -> bool:
+    url = f"http://{ip}:1904/canton"
+    for _ in range(retries):
+        try:
+            r = requests.get(url, params={"action": "powerstatus"}, timeout=3)
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, dict) and "PowerStatus" in data:
+                return True
+        except Exception:
+            pass
+        time.sleep(delay_s)
+    return False
+
+
 def refresh_api_token() -> None:
     token_action = _config.get("RECOVERY", "TOKEN_ACTION", fallback="").strip()
     if not token_action:
@@ -282,15 +315,25 @@ def maybe_recover_libreknx() -> None:
         publish_health()
         return
 
-    if _is_libreknx_running(ip):
-        log.warning("ADB connected and LibreKNX process already running; waiting for API to recover")
-        publish_health()
-        return
+    running_before = _is_libreknx_running(ip)
+    if running_before:
+        log.warning("ADB connected and LibreKNX process is running but API is still down; forcing LibreKNX restart")
+        _stop_libreknx(ip)
 
     if _start_libreknx(ip):
-        log.warning("LibreKNX restarted via ADB")
+        log.warning("LibreKNX start/restart command sent via ADB")
     else:
-        log.warning("LibreKNX restart via ADB failed")
+        log.warning("LibreKNX start/restart via ADB failed")
+
+    if _wait_for_api(ip):
+        _health["api"] = "up"
+        _health["libreknx"] = "running"
+        log.warning("LibreKNX API recovered after restart")
+    else:
+        _health["api"] = "down"
+        _health["libreknx"] = "running" if _is_libreknx_running(ip) else "down"
+        log.warning("LibreKNX process recovery attempted, but API is still down")
+
     publish_health()
 
 
