@@ -104,6 +104,8 @@ $loglevel     = $plugin_cfg['MONITOR']['LOGLEVEL']      ?? '4';
 $recover_threshold = $plugin_cfg['RECOVERY']['FAILURE_THRESHOLD'] ?? '3';
 $recover_cooldown  = $plugin_cfg['RECOVERY']['COOLDOWN_SECONDS']  ?? '90';
 $token_action      = $plugin_cfg['RECOVERY']['TOKEN_ACTION']      ?? '';
+$enable_power_off = !empty($plugin_cfg['EXPERIMENTAL']['ENABLE_POWER_OFF']) && $plugin_cfg['EXPERIMENTAL']['ENABLE_POWER_OFF'] !== '0';
+$enable_input_switching = !empty($plugin_cfg['EXPERIMENTAL']['ENABLE_INPUT_SWITCHING']) && $plugin_cfg['EXPERIMENTAL']['ENABLE_INPUT_SWITCHING'] !== '0';
 
 $save_msg = '';
 $save_ok  = true;
@@ -127,6 +129,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
     $new_fail_threshold = max(1, min(20, (int)($_POST['recover_threshold'] ?? 3)));
     $new_cooldown = max(10, min(3600, (int)($_POST['recover_cooldown'] ?? 90)));
     $new_token_action = trim($_POST['token_action'] ?? '');
+    $new_enable_power_off = isset($_POST['enable_power_off']) ? 1 : 0;
+    $new_enable_input_switching = isset($_POST['enable_input_switching']) ? 1 : 0;
 
     // Auto-discover MAC via ARP if left blank
     if (empty($new_mac) && !empty($new_ip)) {
@@ -153,7 +157,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
     $cfg_content .= "[RECOVERY]\n";
     $cfg_content .= "FAILURE_THRESHOLD=$new_fail_threshold\n";
     $cfg_content .= "COOLDOWN_SECONDS=$new_cooldown\n";
-    $cfg_content .= "TOKEN_ACTION=$new_token_action\n";
+    $cfg_content .= "TOKEN_ACTION=$new_token_action\n\n";
+    $cfg_content .= "[EXPERIMENTAL]\n";
+    $cfg_content .= "ENABLE_POWER_OFF=$new_enable_power_off\n";
+    $cfg_content .= "ENABLE_INPUT_SWITCHING=$new_enable_input_switching\n";
 
     @mkdir($lbpconfigdir, 0755, true);
     $written = file_put_contents("$lbpconfigdir/cantonbar.cfg", $cfg_content);
@@ -170,6 +177,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
         $recover_threshold = $new_fail_threshold;
         $recover_cooldown = $new_cooldown;
         $token_action = $new_token_action;
+        $enable_power_off = (bool)$new_enable_power_off;
+        $enable_input_switching = (bool)$new_enable_input_switching;
         $save_msg = "Configuration saved. Daemon restarted.";
     }
 }
@@ -379,6 +388,26 @@ LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
                 <small class="form-text text-muted">If set, daemon calls this action after recovery/start and stores token health status.</small>
             </div>
         </div>
+        <div class="form-group row">
+            <label class="col-sm-4 col-form-label">Experimental power off</label>
+            <div class="col-sm-8">
+                <div class="form-check mt-2">
+                    <input class="form-check-input" type="checkbox" name="enable_power_off" id="enable_power_off" value="1"<?= $enable_power_off ? ' checked' : '' ?>>
+                    <label class="form-check-label" for="enable_power_off">Enable network standby command</label>
+                </div>
+                <small class="form-text text-muted">Disabled by default because current LibreKNX standby action returns HTTP 400 and can destabilize the API.</small>
+            </div>
+        </div>
+        <div class="form-group row">
+            <label class="col-sm-4 col-form-label">Experimental input switching</label>
+            <div class="col-sm-8">
+                <div class="form-check mt-2">
+                    <input class="form-check-input" type="checkbox" name="enable_input_switching" id="enable_input_switching" value="1"<?= $enable_input_switching ? ' checked' : '' ?>>
+                    <label class="form-check-label" for="enable_input_switching">Enable input_N commands</label>
+                </div>
+                <small class="form-text text-muted">Disabled by default because tested input actions are currently unverified and may crash LibreKNX.</small>
+            </div>
+        </div>
 
         <button type="submit" class="btn btn-primary">Save Configuration</button>
         </form>
@@ -395,7 +424,7 @@ LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
         <input type="hidden" name="action" value="test_cmd">
         <div class="d-flex flex-wrap" style="gap:6px;">
             <button type="submit" name="test_cmd" value="power_on"    class="btn btn-success">Power On (WoL)</button>
-            <button type="submit" name="test_cmd" value="power_off"   class="btn btn-danger">Standby</button>
+            <button type="submit" name="test_cmd" value="power_off"   class="btn btn-danger"<?= $enable_power_off ? '' : ' disabled title="Enable Experimental power off in Configuration first"' ?>>Standby</button>
             <button type="submit" name="test_cmd" value="volume_up"   class="btn btn-secondary">Vol +</button>
             <button type="submit" name="test_cmd" value="volume_down" class="btn btn-secondary">Vol −</button>
             <button type="submit" name="test_cmd" value="mute_on"     class="btn btn-warning">Mute</button>
@@ -403,6 +432,10 @@ LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
             <button type="submit" name="test_cmd" value="mute_toggle" class="btn btn-outline-secondary">Mute Toggle</button>
         </div>
         </form>
+
+        <div class="small text-muted mb-3">
+            <strong>Note:</strong> <code>power_off</code> and <code>input_N</code> are experimental and disabled by default because current LibreKNX behavior can crash the API.
+        </div>
 
         <!-- Custom command: separate form, different field name -->
         <form method="post" class="mb-3">

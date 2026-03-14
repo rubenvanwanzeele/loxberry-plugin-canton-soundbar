@@ -81,6 +81,8 @@ _last_state: str = ""
 _last_volume: str = ""
 _last_mute: str = ""
 _last_input: str = ""
+_volume_override: int | None = None
+_volume_override_ts: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +158,20 @@ def api_post(action: str, body: dict, timeout: int = 4) -> dict:
 def api_ok(result: dict) -> bool:
     """LibreKNX success response is usually status=101 (ERROR-OK)."""
     return isinstance(result, dict) and result.get("status") == 101
+
+
+def set_volume_override(volume: int) -> None:
+    global _volume_override, _volume_override_ts
+    _volume_override = max(0, min(100, int(volume)))
+    _volume_override_ts = time.time()
+
+
+def get_volume_override(max_age_s: int = 1800) -> int | None:
+    if _volume_override is None:
+        return None
+    if time.time() - _volume_override_ts > max_age_s:
+        return None
+    return _volume_override
 
 
 def _run_cmd(cmd: list[str], timeout: int = 8) -> tuple[int, str, str]:
@@ -399,6 +415,12 @@ def get_soundbar_state() -> dict:
         state["volume"] = int(status.get("Volume", 0))
         state["mute"] = "on" if status.get("MuteStatus", False) else "off"
 
+    override_volume = get_volume_override()
+    if override_volume is not None and state["power"] == "on":
+        if state["volume"] != override_volume:
+            log.debug(f"Using local commanded volume override {override_volume} instead of stale API value {state['volume']}")
+        state["volume"] = override_volume
+
     inp = api_get("input")
     if inp:
         state["input"] = str(inp.get("InputSource", "0"))
@@ -494,8 +516,9 @@ def handle_command(cmd: str) -> None:
                 log.warning("power_on: no MAC configured for Wake-on-LAN")
 
         elif cmd == "power_off":
-            # Known unverified in NEXT_SESSION: only try standby here.
-            # Do not probe other actions automatically; invalid actions can destabilize LibreKNX.
+            if not _config.getboolean("EXPERIMENTAL", "ENABLE_POWER_OFF", fallback=False):
+                log.warning("power_off ignored: network standby is not verified for this device and is disabled by default")
+                return
             result = api_post("standby", {"standby": True})
             log.info(f"Standby: {result}")
 
@@ -507,28 +530,34 @@ def handle_command(cmd: str) -> None:
                 if not api_ok(result):
                     # Fallback noted in NEXT_SESSION (possible uppercase field name)
                     result = api_post("volume", {"Volume": vol})
+                if api_ok(result):
+                    set_volume_override(vol)
                 log.info(f"Volume set {vol}: {result}")
             except (ValueError, IndexError):
                 log.warning(f"Invalid volume command: {cmd!r}")
 
         elif cmd == "volume_up":
             status = api_get("status")
-            current = int(status.get("Volume", 50))
+            current = get_volume_override() or int(status.get("Volume", 50))
             step = _config.getint("SOUNDBAR", "VOLUME_STEP", fallback=5)
             new_vol = min(100, current + step)
             result = api_post("volume", {"volume": new_vol})
             if not api_ok(result):
                 result = api_post("volume", {"Volume": new_vol})
+            if api_ok(result):
+                set_volume_override(new_vol)
             log.info(f"Volume up: {current} → {new_vol}: {result}")
 
         elif cmd == "volume_down":
             status = api_get("status")
-            current = int(status.get("Volume", 50))
+            current = get_volume_override() or int(status.get("Volume", 50))
             step = _config.getint("SOUNDBAR", "VOLUME_STEP", fallback=5)
             new_vol = max(0, current - step)
             result = api_post("volume", {"volume": new_vol})
             if not api_ok(result):
                 result = api_post("volume", {"Volume": new_vol})
+            if api_ok(result):
+                set_volume_override(new_vol)
             log.info(f"Volume down: {current} → {new_vol}: {result}")
 
         elif cmd == "mute_on":
@@ -552,6 +581,9 @@ def handle_command(cmd: str) -> None:
             log.info(f"Mute toggle (was {currently_muted}): {result}")
 
         elif cmd.startswith("input_"):
+            if not _config.getboolean("EXPERIMENTAL", "ENABLE_INPUT_SWITCHING", fallback=False):
+                log.warning(f"{cmd} ignored: input switching is not verified for this device and is disabled by default")
+                return
             source = cmd[6:]  # "input_3" → "3"
             # Try capitalized key first (as hinted by NEXT_SESSION), then lowercase fallback.
             result = api_post("input", {"InputSource": source})
@@ -634,6 +666,7 @@ def run_poll_loop() -> None:
         if state.get("_api_ok"):
             _api_fail_streak = 0
             _health["api"] = "up"
+            _health["libreknx"] = "running"
         else:
             _api_fail_streak += 1
             _health["api"] = "down"
