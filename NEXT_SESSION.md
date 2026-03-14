@@ -1,5 +1,20 @@
 # Next Session Handoff
 
+## 2026-03-14 Checkpoint (latest)
+
+- `bin/monitor.py` now includes a post-power-command transition window with target tracking.
+- Auto-recovery suppression is limited to `power_off` standby grace only.
+- `power_on` still allows normal API-failure counting/recovery during wake path.
+- Explicit trace/log added: `api_down_expected_after_standby` when API loss is expected.
+- Default grace config added: `MONITOR.POWER_TRANSITION_GRACE_SECONDS=25` in `config/cantonbar.cfg`.
+
+### Remaining before release/install URL
+
+1. Validate with real device logs that `power_off` no longer triggers recovery inside grace.
+2. Sanity-check that `power_on` still recovers if API stays down unexpectedly.
+3. Commit and push to `origin/master`.
+4. Publish the install URL (test URL: `master.zip`; release URL after tagging).
+
 This file tells the next AI agent exactly where we left off and what to do next.
 
 ---

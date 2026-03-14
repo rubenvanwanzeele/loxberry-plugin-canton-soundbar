@@ -88,6 +88,9 @@ _trace_seq = 0
 _source_map: dict[str, str] = {}
 _source_map_ts: float = 0.0
 _last_input_map_json: str = ""
+_power_transition_until: float = 0.0
+_power_transition_target: str = ""
+_power_transition_noted: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +245,40 @@ def refresh_source_map(force: bool = False) -> None:
 
 def input_name_for(value: str) -> str:
     return _source_map.get(str(value), f"SRC_{value}")
+
+
+def _normalize_power_status(value: str) -> str:
+    token = str(value or "").strip().upper()
+    if token == "ON":
+        return "on"
+    if token in ("STANDBY", "STB_NSB", "OFF"):
+        return "standby"
+    return ""
+
+
+def start_power_transition(target: str) -> None:
+    global _power_transition_until, _power_transition_target, _power_transition_noted
+    grace = _config.getint("MONITOR", "POWER_TRANSITION_GRACE_SECONDS", fallback=25)
+    _power_transition_until = time.time() + max(3, grace)
+    _power_transition_target = target if target in ("on", "standby") else ""
+    _power_transition_noted = False
+    if _power_transition_target:
+        trace_event("power_transition_started", target=_power_transition_target, grace_seconds=max(3, grace))
+
+
+def in_power_transition() -> bool:
+    return time.time() < _power_transition_until
+
+
+def api_down_expected_after_standby() -> bool:
+    return _power_transition_target == "standby" and in_power_transition()
+
+
+def clear_power_transition() -> None:
+    global _power_transition_until, _power_transition_target, _power_transition_noted
+    _power_transition_until = 0.0
+    _power_transition_target = ""
+    _power_transition_noted = False
 
 
 def _run_cmd(cmd: list[str], timeout: int = 8) -> tuple[int, str, str]:
@@ -528,25 +565,32 @@ def get_soundbar_state() -> dict:
       mute:   "on" | "off"
       input:  str (input source number)
     """
+    fallback_power = _last_state if _last_state in ("on", "standby") else "standby"
     fallback_volume = get_volume_override() or (int(_last_volume) if _last_volume.isdigit() else 0)
     fallback_mute = _last_mute if _last_mute in ("on", "off") else "off"
     fallback_input = _last_input if _last_input else "0"
     state = {
-        "power": "standby",
+        "power": fallback_power,
         "volume": fallback_volume,
         "mute": fallback_mute,
         "input": fallback_input,
         "input_name": input_name_for(fallback_input),
         "_api_ok": False,
+        "_power_confirmed": False,
     }
 
     power_data = api_get("powerstatus")
-    if power_data:
+    if isinstance(power_data, dict) and power_data:
         state["_api_ok"] = True
-    if power_data.get("PowerStatus", "").upper() != "ON":
+
+    power = _normalize_power_status(power_data.get("PowerStatus", "")) if isinstance(power_data, dict) else ""
+    if power:
+        state["power"] = power
+        state["_power_confirmed"] = True
+
+    if state["_power_confirmed"] and state["power"] != "on":
         return state  # standby — no point polling the rest
 
-    state["power"] = "on"
     refresh_source_map()
 
     status_timeout = _config.getint("MONITOR", "STATUS_TIMEOUT", fallback=2)
@@ -584,6 +628,7 @@ def publish_state(state: dict) -> None:
     global _last_state, _last_volume, _last_mute, _last_input, _last_input_name, _last_input_map_json
 
     power  = state["power"]
+    power_confirmed = bool(state.get("_power_confirmed"))
     volume = str(state["volume"])
     mute   = state["mute"]
     inp    = state["input"]
@@ -596,10 +641,14 @@ def publish_state(state: dict) -> None:
     input_name_topic = _config.get("MQTT", "INPUT_NAME_TOPIC", fallback="loxberry/plugin/cantonbar/input_name")
     input_map_topic = _config.get("MQTT", "INPUT_MAP_TOPIC", fallback="loxberry/plugin/cantonbar/input_map")
 
-    if power != _last_state:
-        _publish(state_topic, power)
-        log.info(f"State → {power!r}")
-        _last_state = power
+    if power_confirmed:
+        if power != _last_state:
+            _publish(state_topic, power)
+            log.info(f"State → {power!r}")
+            _last_state = power
+    elif _last_state:
+        # Do not publish unconfirmed power guesses during API outages.
+        power = _last_state
 
     if volume != _last_volume:
         _publish(volume_topic, volume)
@@ -683,12 +732,14 @@ def handle_command(cmd: str) -> None:
             # Prefer the verified internal standby-off control path via LUCI.
             if ip and _adb_connect(ip) and _send_luci_local(ip, 70, "STANDBYOFF"):
                 log.info("Power on requested via LUCI STANDBYOFF")
+                start_power_transition("on")
                 cmd_done(True, {"action": "adb_standbyoff"})
             else:
                 wol_mac = resolve_wol_mac()
                 if wol_mac:
                     wakeonlan.send_magic_packet(wol_mac)
                     log.info(f"Wake-on-LAN sent to {wol_mac}")
+                    start_power_transition("on")
                     cmd_done(True, {"action": "wol", "mac": wol_mac})
                 else:
                     log.warning("power_on failed: LUCI standby-off unavailable and no valid MAC for WoL")
@@ -701,11 +752,14 @@ def handle_command(cmd: str) -> None:
                 return
             if ip and _adb_connect(ip) and _send_luci_local(ip, 70, "STANDBYON"):
                 log.info("Standby requested via LUCI STANDBYON")
+                start_power_transition("standby")
                 cmd_done(True, {"action": "adb_standbyon"})
             else:
                 # Last resort: legacy HTTP standby (known unreliable on this firmware).
                 result = api_post("standby", {"standby": True})
                 log.info(f"Standby (HTTP fallback): {result}")
+                if api_ok(result):
+                    start_power_transition("standby")
                 cmd_done(api_ok(result), {"action": "standby_http_fallback", "response": result})
 
         elif cmd.startswith("volume_set_"):
@@ -853,7 +907,7 @@ def setup_mqtt() -> mqtt.Client:
 # ---------------------------------------------------------------------------
 
 def run_poll_loop() -> None:
-    global _api_fail_streak
+    global _api_fail_streak, _power_transition_noted
     poll_interval = _config.getint("MONITOR", "POLL_INTERVAL", fallback=5)
     log.info(f"Starting poll loop (interval={poll_interval}s)")
     publish_health(force=True)
@@ -868,9 +922,30 @@ def run_poll_loop() -> None:
             _api_fail_streak = 0
             _health["api"] = "up"
             _health["libreknx"] = "running"
+            _power_transition_noted = False
         else:
-            _api_fail_streak += 1
-            _health["api"] = "down"
+            if api_down_expected_after_standby():
+                # During intentional standby, transport failures are expected.
+                _health["api"] = "unknown"
+                if not _power_transition_noted:
+                    log.info("API down expected after standby command; suppressing auto-recovery during grace window")
+                    trace_event(
+                        "api_down_expected_after_standby",
+                        target="standby",
+                        grace_until=int(_power_transition_until),
+                    )
+                    _power_transition_noted = True
+            else:
+                _api_fail_streak += 1
+                _health["api"] = "down"
+                _power_transition_noted = False
+
+        if state.get("_power_confirmed") and _power_transition_target and state.get("power") == _power_transition_target:
+            trace_event("power_transition_confirmed", target=_power_transition_target, power=state.get("power"))
+            clear_power_transition()
+        elif _power_transition_target and not in_power_transition():
+            trace_event("power_transition_timeout", target=_power_transition_target)
+            clear_power_transition()
 
         threshold = _config.getint("RECOVERY", "FAILURE_THRESHOLD", fallback=3)
         if _api_fail_streak >= threshold:
