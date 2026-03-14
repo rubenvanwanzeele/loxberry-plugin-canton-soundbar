@@ -18,12 +18,15 @@ echo "<INFO> Re-installing Python dependencies..."
 pip3 install --quiet paho-mqtt wakeonlan requests 2>&1
 echo "<OK> Python dependencies re-installed."
 
-if command -v adb >/dev/null 2>&1; then
-    echo "<OK> adb detected ($(command -v adb))"
+ADB_BIN="$(command -v adb 2>/dev/null || true)"
+if [ -z "$ADB_BIN" ] && [ -x /usr/bin/adb ]; then
+    ADB_BIN="/usr/bin/adb"
+fi
+
+if [ -n "$ADB_BIN" ]; then
+    echo "<OK> adb detected ($ADB_BIN)"
 else
-    echo "<WARNING> adb not found in postupgrade check."
-    echo "<WARNING> This script runs as loxberry and cannot apt-install system packages."
-    echo "<WARNING> Install manually: sudo apt install -y adb"
-    echo "<WARNING> Or on some systems: sudo apt install -y android-tools-adb"
+    echo "<INFO> adb not detected in postupgrade user phase."
+    echo "<INFO> postroot.sh (root phase) installs adb when available."
 fi
 exit 0
