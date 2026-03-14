@@ -83,6 +83,7 @@ _last_mute: str = ""
 _last_input: str = ""
 _volume_override: int | None = None
 _volume_override_ts: float = 0.0
+_trace_seq = 0
 
 
 # ---------------------------------------------------------------------------
@@ -130,9 +131,11 @@ def api_get(action: str, timeout: int = 4) -> dict:
         except requests.exceptions.JSONDecodeError:
             body = (r.text or "").strip()[:200] if 'r' in locals() else ""
             log.warning(f"GET {action} returned non-JSON (HTTP {getattr(r, 'status_code', '?')}): {body!r}")
+            _trace_publish("error", _trace_payload("api_get_non_json", action=action, http=getattr(r, "status_code", "?"), body=body), retain=True)
             return {}
         except Exception as e:
             log.warning(f"GET {action} failed: {type(e).__name__}: {e}")
+            _trace_publish("error", _trace_payload("api_get_failed", action=action, error=f"{type(e).__name__}: {e}"), retain=True)
             return {}
 
 
@@ -149,9 +152,11 @@ def api_post(action: str, body: dict, timeout: int = 4) -> dict:
         except requests.exceptions.JSONDecodeError:
             body_txt = (r.text or "").strip()[:200] if 'r' in locals() else ""
             log.warning(f"POST {action} {body} returned non-JSON (HTTP {getattr(r, 'status_code', '?')}): {body_txt!r}")
+            _trace_publish("error", _trace_payload("api_post_non_json", action=action, request=body, http=getattr(r, "status_code", "?"), body=body_txt), retain=True)
             return {}
         except Exception as e:
             log.warning(f"POST {action} {body} failed: {type(e).__name__}: {e}")
+            _trace_publish("error", _trace_payload("api_post_failed", action=action, request=body, error=f"{type(e).__name__}: {e}"), retain=True)
             return {}
 
 
@@ -190,6 +195,46 @@ def _health_topics() -> dict:
         "libreknx": _config.get("MQTT", "LIBREKNX_HEALTH_TOPIC", fallback=f"{base}/libreknx"),
         "token": _config.get("MQTT", "TOKEN_HEALTH_TOPIC", fallback=f"{base}/token"),
     }
+
+
+def _trace_topics() -> dict:
+    base = _config.get("MQTT", "TRACE_BASE_TOPIC", fallback="loxberry/plugin/cantonbar/trace")
+    return {
+        "event": _config.get("MQTT", "TRACE_EVENT_TOPIC", fallback=f"{base}/event"),
+        "command": _config.get("MQTT", "TRACE_LAST_COMMAND_TOPIC", fallback=f"{base}/last_command"),
+        "result": _config.get("MQTT", "TRACE_LAST_RESULT_TOPIC", fallback=f"{base}/last_result"),
+        "error": _config.get("MQTT", "TRACE_LAST_ERROR_TOPIC", fallback=f"{base}/last_error"),
+    }
+
+
+def _trace_payload(event: str, **fields) -> dict:
+    global _trace_seq
+    _trace_seq += 1
+    payload = {"ts": int(time.time()), "seq": _trace_seq, "event": event}
+    payload.update(fields)
+    return payload
+
+
+def _trace_publish(topic_key: str, payload: dict, retain: bool = True) -> None:
+    try:
+        topic = _trace_topics()[topic_key]
+        _publish(topic, json.dumps(payload, separators=(",", ":")), retain=retain)
+    except Exception as e:
+        log.debug(f"Trace publish failed: {e}")
+
+
+def trace_event(event: str, level: str = "info", retain_event: bool = False, **fields) -> None:
+    payload = _trace_payload(event, **fields)
+    text = f"TRACE {payload['seq']} {event}: {fields}"
+    if level == "warning":
+        log.warning(text)
+    elif level == "error":
+        log.error(text)
+    elif level == "debug":
+        log.debug(text)
+    else:
+        log.info(text)
+    _trace_publish("event", payload, retain=retain_event)
 
 
 def publish_health(force: bool = False) -> None:
@@ -356,12 +401,14 @@ def maybe_recover_libreknx() -> None:
     _health["api"] = "recovering"
     _health["libreknx"] = "restarting"
     publish_health()
+    trace_event("recovery_started", level="warning", api=_health["api"], libreknx=_health["libreknx"])
 
     log.warning("LibreKNX API appears down; attempting ADB-based recovery")
     if not _adb_connect(ip):
         _health["api"] = "down"
         _health["libreknx"] = "unknown"
         publish_health()
+        _trace_publish("error", _trace_payload("recovery_failed", stage="adb_connect"), retain=True)
         return
 
     running_before = _is_libreknx_running(ip)
@@ -371,19 +418,23 @@ def maybe_recover_libreknx() -> None:
 
     if _start_libreknx(ip):
         log.warning("LibreKNX start/restart command sent via ADB")
+        trace_event("recovery_restart_sent", level="warning")
     else:
         _health["api"] = "down"
         _health["libreknx"] = "start_failed"
         log.warning("LibreKNX start/restart via ADB failed")
+        _trace_publish("error", _trace_payload("recovery_failed", stage="start_libreknx"), retain=True)
 
     if _wait_for_api(ip):
         _health["api"] = "up"
         _health["libreknx"] = "running"
         log.warning("LibreKNX API recovered after restart")
+        trace_event("recovery_succeeded", level="warning", api="up")
     else:
         _health["api"] = "down"
         _health["libreknx"] = "running" if _is_libreknx_running(ip) else "down"
         log.warning("LibreKNX process recovery attempted, but API is still down")
+        _trace_publish("error", _trace_payload("recovery_failed", stage="api_not_recovered", libreknx=_health["libreknx"]), retain=True)
 
     publish_health()
 
@@ -488,19 +539,23 @@ def on_mqtt_connect(client, userdata, flags, rc) -> None:
         cmd_topic = _config.get("MQTT", "CMD_TOPIC", fallback="loxberry/plugin/cantonbar/cmd")
         client.subscribe(cmd_topic, qos=1)
         log.info(f"MQTT connected, subscribed to {cmd_topic}")
+        trace_event("mqtt_connected", cmd_topic=cmd_topic)
         republish_all()
     else:
         log.error(f"MQTT connection failed, rc={rc}")
+        _trace_publish("error", _trace_payload("mqtt_connect_failed", rc=rc), retain=True)
 
 
 def on_mqtt_disconnect(client, userdata, rc) -> None:
     if rc != 0:
         log.warning(f"MQTT disconnected unexpectedly (rc={rc}), will auto-reconnect")
+        _trace_publish("error", _trace_payload("mqtt_disconnected", rc=rc), retain=True)
 
 
 def on_mqtt_message(client, userdata, msg) -> None:
     payload = msg.payload.decode("utf-8", errors="ignore").strip()
     log.info(f"MQTT command received: {payload!r}")
+    _trace_publish("command", _trace_payload("command_received", topic=msg.topic, command=payload), retain=True)
     handle_command(payload)
 
 
@@ -508,19 +563,32 @@ def handle_command(cmd: str) -> None:
     mac = _config.get("SOUNDBAR", "MAC", fallback="")
 
     try:
+        started = time.time()
+
+        def cmd_done(success: bool, detail: dict) -> None:
+            elapsed_ms = int((time.time() - started) * 1000)
+            payload = _trace_payload("command_result", command=cmd, ok=success, elapsed_ms=elapsed_ms, **detail)
+            _trace_publish("result", payload, retain=True)
+            if not success:
+                _trace_publish("error", payload, retain=True)
+
         if cmd == "power_on":
             if mac:
                 wakeonlan.send_magic_packet(mac)
                 log.info(f"Wake-on-LAN sent to {mac}")
+                cmd_done(True, {"action": "wol", "mac": mac})
             else:
                 log.warning("power_on: no MAC configured for Wake-on-LAN")
+                cmd_done(False, {"action": "wol", "error": "no_mac_configured"})
 
         elif cmd == "power_off":
             if not _config.getboolean("EXPERIMENTAL", "ENABLE_POWER_OFF", fallback=False):
                 log.warning("power_off ignored: network standby is not verified for this device and is disabled by default")
+                cmd_done(False, {"action": "standby", "error": "disabled_by_config"})
                 return
             result = api_post("standby", {"standby": True})
             log.info(f"Standby: {result}")
+            cmd_done(api_ok(result), {"action": "standby", "response": result})
 
         elif cmd.startswith("volume_set_"):
             try:
@@ -533,8 +601,10 @@ def handle_command(cmd: str) -> None:
                 if api_ok(result):
                     set_volume_override(vol)
                 log.info(f"Volume set {vol}: {result}")
+                cmd_done(api_ok(result), {"action": "volume_set", "target": vol, "response": result})
             except (ValueError, IndexError):
                 log.warning(f"Invalid volume command: {cmd!r}")
+                cmd_done(False, {"action": "volume_set", "error": "invalid_command"})
 
         elif cmd == "volume_up":
             status = api_get("status")
@@ -547,6 +617,7 @@ def handle_command(cmd: str) -> None:
             if api_ok(result):
                 set_volume_override(new_vol)
             log.info(f"Volume up: {current} → {new_vol}: {result}")
+            cmd_done(api_ok(result), {"action": "volume_up", "from": current, "to": new_vol, "response": result})
 
         elif cmd == "volume_down":
             status = api_get("status")
@@ -559,6 +630,7 @@ def handle_command(cmd: str) -> None:
             if api_ok(result):
                 set_volume_override(new_vol)
             log.info(f"Volume down: {current} → {new_vol}: {result}")
+            cmd_done(api_ok(result), {"action": "volume_down", "from": current, "to": new_vol, "response": result})
 
         elif cmd == "mute_on":
             power = api_get("powerstatus").get("PowerStatus", "").upper()
@@ -566,6 +638,7 @@ def handle_command(cmd: str) -> None:
                 log.warning("mute_on requested while soundbar is STANDBY; command may be ignored by device")
             result = api_post("mute", {"mute": True})
             log.info(f"Mute on: {result}")
+            cmd_done(api_ok(result), {"action": "mute_on", "response": result})
 
         elif cmd == "mute_off":
             power = api_get("powerstatus").get("PowerStatus", "").upper()
@@ -573,16 +646,19 @@ def handle_command(cmd: str) -> None:
                 log.warning("mute_off requested while soundbar is STANDBY; command may be ignored by device")
             result = api_post("mute", {"mute": False})
             log.info(f"Mute off: {result}")
+            cmd_done(api_ok(result), {"action": "mute_off", "response": result})
 
         elif cmd == "mute_toggle":
             status = api_get("status")
             currently_muted = status.get("MuteStatus", False)
             result = api_post("mute", {"mute": not currently_muted})
             log.info(f"Mute toggle (was {currently_muted}): {result}")
+            cmd_done(api_ok(result), {"action": "mute_toggle", "was": bool(currently_muted), "response": result})
 
         elif cmd.startswith("input_"):
             if not _config.getboolean("EXPERIMENTAL", "ENABLE_INPUT_SWITCHING", fallback=False):
                 log.warning(f"{cmd} ignored: input switching is not verified for this device and is disabled by default")
+                cmd_done(False, {"action": "input_switch", "error": "disabled_by_config"})
                 return
             source = cmd[6:]  # "input_3" → "3"
             # Try capitalized key first (as hinted by NEXT_SESSION), then lowercase fallback.
@@ -590,12 +666,15 @@ def handle_command(cmd: str) -> None:
             if not api_ok(result):
                 result = api_post("input", {"inputsource": source})
             log.info(f"Input → {source!r}: {result}")
+            cmd_done(api_ok(result), {"action": "input_switch", "target": source, "response": result})
 
         else:
             log.warning(f"Unknown command: {cmd!r}")
+            cmd_done(False, {"action": "unknown", "error": "unknown_command"})
 
     except Exception as e:
         log.error(f"Command '{cmd}' failed: {type(e).__name__}: {e}")
+        _trace_publish("error", _trace_payload("command_exception", command=cmd, error=f"{type(e).__name__}: {e}"), retain=True)
 
 
 # ---------------------------------------------------------------------------
