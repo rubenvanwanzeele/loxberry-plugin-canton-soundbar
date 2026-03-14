@@ -238,7 +238,7 @@ def _start_libreknx(ip: str) -> bool:
     rc, out, err = _run_cmd(cmd, timeout=8)
     if rc == 0:
         time.sleep(2)
-        if _wait_for_api(ip, retries=3, delay_s=1) or _is_libreknx_running(ip):
+        if _wait_for_api(ip, retries=3, delay_s=1):
             return True
 
     log.warning(f"Detached LibreKNX start via adb shell did not recover API yet: rc={rc}, out={out!r}, err={err!r}")
@@ -259,7 +259,7 @@ def _start_libreknx(ip: str) -> bool:
         return False
 
     time.sleep(3)
-    ok = _wait_for_api(ip, retries=3, delay_s=1) or _is_libreknx_running(ip)
+    ok = _wait_for_api(ip, retries=3, delay_s=1)
     if not ok:
         _health["libreknx"] = "start_failed"
     return ok
