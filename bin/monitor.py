@@ -55,6 +55,7 @@ log = logging.getLogger("cantonbar")
 _config: configparser.ConfigParser = None
 _mqtt_client: mqtt.Client = None
 _shutdown = threading.Event()
+_api_lock = threading.Lock()
 
 # Last published values — only publish on change
 _last_state: str = ""
@@ -98,37 +99,39 @@ def _api_url() -> str:
 
 def api_get(action: str, timeout: int = 4) -> dict:
     """GET /canton?action=ACTION. Returns parsed JSON dict or {} on error."""
-    try:
-        r = requests.get(_api_url(), params={"action": action}, timeout=timeout)
-        r.raise_for_status()
-        data = r.json()
-        log.debug(f"GET {action}: {data}")
-        return data
-    except requests.exceptions.JSONDecodeError:
-        body = (r.text or "").strip()[:200] if 'r' in locals() else ""
-        log.warning(f"GET {action} returned non-JSON (HTTP {getattr(r, 'status_code', '?')}): {body!r}")
-        return {}
-    except Exception as e:
-        log.warning(f"GET {action} failed: {type(e).__name__}: {e}")
-        return {}
+    with _api_lock:
+        try:
+            r = requests.get(_api_url(), params={"action": action}, timeout=timeout)
+            r.raise_for_status()
+            data = r.json()
+            log.debug(f"GET {action}: {data}")
+            return data
+        except requests.exceptions.JSONDecodeError:
+            body = (r.text or "").strip()[:200] if 'r' in locals() else ""
+            log.warning(f"GET {action} returned non-JSON (HTTP {getattr(r, 'status_code', '?')}): {body!r}")
+            return {}
+        except Exception as e:
+            log.warning(f"GET {action} failed: {type(e).__name__}: {e}")
+            return {}
 
 
 def api_post(action: str, body: dict, timeout: int = 4) -> dict:
     """POST /canton?action=ACTION with JSON body. Returns parsed JSON or {} on error."""
-    try:
-        r = requests.post(_api_url(), params={"action": action},
-                          json=body, timeout=timeout)
-        r.raise_for_status()
-        data = r.json()
-        log.debug(f"POST {action} {body}: {data}")
-        return data
-    except requests.exceptions.JSONDecodeError:
-        body_txt = (r.text or "").strip()[:200] if 'r' in locals() else ""
-        log.warning(f"POST {action} {body} returned non-JSON (HTTP {getattr(r, 'status_code', '?')}): {body_txt!r}")
-        return {}
-    except Exception as e:
-        log.warning(f"POST {action} {body} failed: {type(e).__name__}: {e}")
-        return {}
+    with _api_lock:
+        try:
+            r = requests.post(_api_url(), params={"action": action},
+                              json=body, timeout=timeout)
+            r.raise_for_status()
+            data = r.json()
+            log.debug(f"POST {action} {body}: {data}")
+            return data
+        except requests.exceptions.JSONDecodeError:
+            body_txt = (r.text or "").strip()[:200] if 'r' in locals() else ""
+            log.warning(f"POST {action} {body} returned non-JSON (HTTP {getattr(r, 'status_code', '?')}): {body_txt!r}")
+            return {}
+        except Exception as e:
+            log.warning(f"POST {action} {body} failed: {type(e).__name__}: {e}")
+            return {}
 
 
 def api_ok(result: dict) -> bool:
@@ -256,12 +259,9 @@ def handle_command(cmd: str) -> None:
                 log.warning("power_on: no MAC configured for Wake-on-LAN")
 
         elif cmd == "power_off":
-            # Known unverified in NEXT_SESSION: try standby first, then fallback actions.
+            # Known unverified in NEXT_SESSION: only try standby here.
+            # Do not probe other actions automatically; invalid actions can destabilize LibreKNX.
             result = api_post("standby", {"standby": True})
-            if not api_ok(result):
-                result = api_post("networkstandby", {})
-            if not api_ok(result):
-                result = api_post("poweroff", {})
             log.info(f"Standby: {result}")
 
         elif cmd.startswith("volume_set_"):
