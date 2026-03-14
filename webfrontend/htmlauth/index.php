@@ -451,6 +451,7 @@ if (file_exists($logfile) && filesize($logfile) > 0) {
 <script>
 function healthBadgeClass(v) {
     if (v === 'up' || v === 'running' || v === 'connected' || v === 'ok') return 'badge-success';
+    if (v === 'recovering' || v === 'restarting') return 'badge-warning';
     if (v === 'disabled') return 'badge-info';
     if (v === 'unknown') return 'badge-secondary';
     return 'badge-danger';

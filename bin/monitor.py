@@ -310,8 +310,14 @@ def maybe_recover_libreknx() -> None:
     if not ip:
         return
 
+    _health["api"] = "recovering"
+    _health["libreknx"] = "restarting"
+    publish_health()
+
     log.warning("LibreKNX API appears down; attempting ADB-based recovery")
     if not _adb_connect(ip):
+        _health["api"] = "down"
+        _health["libreknx"] = "unknown"
         publish_health()
         return
 
@@ -323,6 +329,8 @@ def maybe_recover_libreknx() -> None:
     if _start_libreknx(ip):
         log.warning("LibreKNX start/restart command sent via ADB")
     else:
+        _health["api"] = "down"
+        _health["libreknx"] = "start_failed"
         log.warning("LibreKNX start/restart via ADB failed")
 
     if _wait_for_api(ip):
