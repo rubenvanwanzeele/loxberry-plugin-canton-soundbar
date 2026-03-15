@@ -282,6 +282,8 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
 .sf-btn:hover { opacity:.87; }
 .sf-btn-row { display:flex; flex-wrap:wrap; gap:8px; }
 .sf-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.sf-actions form { margin:0; }
+.sf-actions .sf-btn { width:auto; display:inline-block; white-space:nowrap; }
 .sf-muted { color:#7f8c8d; font-size:.9em; }
 .sf-state-badge { display:inline-block; padding:6px 18px; border-radius:20px; color:#fff; font-weight:600; font-size:1em; cursor:pointer; border:none; }
 .sf-state-on      { background:#27ae60; }
@@ -333,7 +335,9 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
             <input type="hidden" name="action" value="restart_daemon">
             <button type="submit" class="sf-btn sf-btn-warning">Restart Daemon</button>
         </form>
-        <button type="button" class="sf-btn sf-btn-outline" onclick="window.open('help.html', '_blank', 'noopener');">Help</button>
+        <form method="get" action="help.html" target="_blank" style="display:inline">
+            <button type="submit" class="sf-btn sf-btn-warning">Help</button>
+        </form>
     </div>
 </div>
 <div class="sf-card">
