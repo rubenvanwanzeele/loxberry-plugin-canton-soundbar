@@ -78,6 +78,7 @@ class FfaaClient:
     CMD_STATUS = 0x0002
     CMD_INPUT_MODE = 0x0003
     CMD_POWER = 0x0006
+    CMD_MUTE = 0x0009
     CMD_VOLUME = 0x000C
 
     def __init__(self, host: str, port: int, timeout: float = 2.0) -> None:
@@ -140,7 +141,7 @@ class FfaaClient:
         cmds = []
         if include_supported_inputs:
             cmds.append(self.CMD_STATUS)
-        cmds.extend([self.CMD_POWER, self.CMD_INPUT_MODE, self.CMD_VOLUME])
+        cmds.extend([self.CMD_POWER, self.CMD_INPUT_MODE, self.CMD_MUTE, self.CMD_VOLUME])
         frames = b"".join(self.build_frame(cmd, 0x02) for cmd in cmds)
         parsed = self.transact(frames)
 
@@ -149,6 +150,7 @@ class FfaaClient:
             "input_b1": None,
             "input_b2": None,
             "sound_mode": None,
+            "mute_on": None,
             "volume_raw": None,
             "volume_max": 70,
             "supported_inputs": [],
@@ -162,6 +164,8 @@ class FfaaClient:
                 result["input_b1"] = data[0]
                 result["input_b2"] = data[1]
                 result["sound_mode"] = data[2]
+            elif frame["cmd"] == self.CMD_MUTE and len(data) >= 1:
+                result["mute_on"] = data[0] == 0x01
             elif frame["cmd"] == self.CMD_VOLUME and len(data) >= 1:
                 result["volume_raw"] = data[0]
                 if len(data) >= 2 and data[1] > 0:
@@ -173,6 +177,9 @@ class FfaaClient:
 
     def set_power(self, on: bool) -> list[dict]:
         return self.transact(self.build_frame(self.CMD_POWER, 0x01, bytes([0x01 if on else 0x00])))
+
+    def set_mute(self, on: bool) -> list[dict]:
+        return self.transact(self.build_frame(self.CMD_MUTE, 0x01, bytes([0x01 if on else 0x00])))
 
     def set_volume_raw(self, level: int) -> list[dict]:
         level = max(0, min(70, int(level)))
@@ -427,9 +434,13 @@ def get_soundbar_state() -> dict:
             log.info(f"Discovered unmapped FFAA input tuple {key} (mode={triple[2] if len(triple) > 2 else '?'})")
             _logged_unknown_inputs.add(key)
 
-    mute = get_mute_state()
-    if mute == "unsupported" and _last_mute in ("on", "off"):
-        mute = _last_mute
+    mute_flag = state.get("mute_on")
+    if mute_flag is not None:
+        mute = "on" if bool(mute_flag) else "off"
+    else:
+        mute = get_mute_state()
+        if mute == "unsupported" and _last_mute in ("on", "off"):
+            mute = _last_mute
 
     return {
         "power": power,
@@ -600,22 +611,38 @@ def handle_command(cmd: str) -> None:
 
         if cmd in ("mute_on", "mute_off", "mute_toggle"):
             if cmd == "mute_toggle":
-                current = _last_mute if _last_mute in ("on", "off") else get_mute_state()
+                if _last_mute in ("on", "off"):
+                    current = _last_mute
+                else:
+                    try:
+                        state = client.query_state(include_supported_inputs=False)
+                        if state.get("mute_on") is None:
+                            current = get_mute_state()
+                        else:
+                            current = "on" if bool(state.get("mute_on")) else "off"
+                    except Exception:
+                        current = get_mute_state()
                 target = current != "on"
             else:
                 target = cmd == "mute_on"
 
+            desired = "on" if target else "off"
+            try:
+                response = client.set_mute(target)
+                publish_mute_command_state(desired)
+                log.info(f"Mute set (FFAA): {desired}: {response}")
+                return
+            except Exception as e:
+                log.warning(f"FFAA mute command failed, trying legacy HTTP fallback: {type(e).__name__}: {e}")
+
             if set_mute_state(target):
-                desired = "on" if target else "off"
                 confirmed = get_mute_state()
                 effective = confirmed if confirmed in ("on", "off") else desired
                 publish_mute_command_state(effective)
-                log.info(
-                    "Mute set via legacy HTTP fallback: "
-                    f"desired={desired}, confirmed={confirmed if confirmed != 'unsupported' else 'n/a'}"
-                )
-            else:
-                log.warning("Mute command failed (legacy HTTP fallback disabled or unavailable)")
+                log.info(f"Mute set via legacy HTTP fallback: desired={desired}, confirmed={confirmed if confirmed != 'unsupported' else 'n/a'}")
+                return
+
+            log.warning("Mute command failed (FFAA and legacy HTTP fallback unavailable)")
             return
 
         mode = parse_sound_mode_from_command(cmd)

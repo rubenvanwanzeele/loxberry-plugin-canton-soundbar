@@ -20,7 +20,7 @@ All commands go to one configured command topic (default: `loxberry/plugin/canto
 
 - Power: `power_on`, `power_off`
 - Volume: `volume_set_N`, `volume_up`, `volume_down`
-- Mute: `mute_on`, `mute_off`, `mute_toggle` (HTTP fallback while FFAA mute is not yet confirmed)
+- Mute: `mute_on`, `mute_off`, `mute_toggle` (FFAA `CMD_MUTE 0x0009`, HTTP fallback only if needed)
 - Input by id: `input_3`
 - Input by name alias: `input_arc`, `input_dvd`, `input_bt`, ...
 - Play mode: `mode_stereo`, `mode_movie`, `mode_music`
@@ -28,9 +28,9 @@ All commands go to one configured command topic (default: `loxberry/plugin/canto
 ## FFAA Notes
 
 - Volume is implemented with `CMD_VOLUME (0x000C)` and converted to MQTT `0..100` percent.
+- Mute is implemented with `CMD_MUTE (0x0009)` as boolean `0/1`.
 - Play mode is implemented with `CMD_INPUT_MODE (0x0003)` and payload byte 3 (`1=Stereo`, `2=Movie`, `3=Music`).
 - Input switching uses the same `CMD_INPUT_MODE (0x0003)` with bytes 1+2 from `[FFAA_INPUTS]`.
-- Mute over FFAA is still unconfirmed in this repo; mute commands currently use optional HTTP fallback.
 
 ## Default Input Mapping
 

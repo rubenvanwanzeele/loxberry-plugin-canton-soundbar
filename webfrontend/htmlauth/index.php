@@ -427,7 +427,7 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
             </div>
             <div class="cb-tile">
                 <div class="cb-tile-label">Mute</div>
-                <div class="cb-tile-value" id="st-mute">HTTP fallback</div>
+                <div class="cb-tile-value" id="st-mute">FFAA</div>
             </div>
             <div class="cb-tile">
                 <div class="cb-tile-label">Current Source ID</div>
@@ -558,7 +558,7 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
         <code>power_on</code>, <code>power_off</code>, <code>volume_up</code>, <code>volume_down</code>, <code>volume_set_N</code>,<br>
         <code>mode_stereo</code>, <code>mode_movie</code>, <code>mode_music</code>,<br>
         <code>input_3</code> or alias style <code>input_arc</code>, <code>input_dvd</code>, <code>input_bt</code>, ...<br>
-        <code>mute_on</code>, <code>mute_off</code>, <code>mute_toggle</code> (HTTP fallback while FFAA mute is still being reverse-engineered)
+        <code>mute_on</code>, <code>mute_off</code>, <code>mute_toggle</code> (FFAA, with HTTP fallback only if needed)
     </div>
 
     <div class="cb-section-title">Custom Command</div>

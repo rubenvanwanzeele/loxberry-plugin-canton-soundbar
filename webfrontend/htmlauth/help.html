@@ -21,7 +21,7 @@
   <tr><th>Topic</th><th>Values</th><th>Notes</th></tr>
   <tr><td><code>loxberry/plugin/cantonbar/state</code></td><td><code>on</code> / <code>standby</code></td><td>retained</td></tr>
   <tr><td><code>loxberry/plugin/cantonbar/volume</code></td><td>0–100</td><td>retained, integer</td></tr>
-  <tr><td><code>loxberry/plugin/cantonbar/mute</code></td><td><code>on</code> / <code>off</code> / <code>unsupported</code></td><td>retained, uses HTTP fallback</td></tr>
+  <tr><td><code>loxberry/plugin/cantonbar/mute</code></td><td><code>on</code> / <code>off</code> / <code>unsupported</code></td><td>retained, FFAA-based (unsupported only on temporary comms failure)</td></tr>
   <tr><td><code>loxberry/plugin/cantonbar/input</code></td><td>source ID (e.g. <code>3</code>)</td><td>retained</td></tr>
   <tr><td><code>loxberry/plugin/cantonbar/input_name</code></td><td>friendly name (e.g. <code>ARC</code>)</td><td>retained</td></tr>
   <tr><td><code>loxberry/plugin/cantonbar/input_map</code></td><td>JSON map source→name</td><td>retained</td></tr>
@@ -37,9 +37,9 @@
   <tr><td><code>volume_set_40</code></td><td>Set volume to 40 (0–100)</td></tr>
   <tr><td><code>volume_up</code></td><td>Increase volume by step (default 5)</td></tr>
   <tr><td><code>volume_down</code></td><td>Decrease volume by step</td></tr>
-  <tr><td><code>mute_on</code></td><td>Mute (HTTP fallback while FFAA mute is not confirmed)</td></tr>
-  <tr><td><code>mute_off</code></td><td>Unmute (HTTP fallback while FFAA mute is not confirmed)</td></tr>
-  <tr><td><code>mute_toggle</code></td><td>Toggle mute (HTTP fallback while FFAA mute is not confirmed)</td></tr>
+  <tr><td><code>mute_on</code></td><td>Mute via FFAA (<code>0x0009</code>)</td></tr>
+  <tr><td><code>mute_off</code></td><td>Unmute via FFAA (<code>0x0009</code>)</td></tr>
+  <tr><td><code>mute_toggle</code></td><td>Toggle mute via FFAA (<code>0x0009</code>)</td></tr>
   <tr><td><code>mode_stereo</code>, <code>mode_movie</code>, <code>mode_music</code></td><td>Set play mode on current input</td></tr>
   <tr><td><code>input_3</code></td><td>Switch to source ID 3</td></tr>
   <tr><td><code>input_arc</code>, <code>input_dvd</code>, ...</td><td>Switch using configured source name aliases</td></tr>
@@ -47,6 +47,7 @@
 
 <p><strong>Play mode protocol note:</strong> implemented over FFAA command <code>0x0003</code> (<code>CMD_INPUT_MODE</code>) using payload byte 3: <code>1=Stereo</code>, <code>2=Movie</code>, <code>3=Music</code>.</p>
 <p><strong>Volume protocol note:</strong> implemented over FFAA command <code>0x000C</code> (<code>CMD_VOLUME</code>), then published to MQTT as <code>0-100</code> percent.</p>
+<p><strong>Mute protocol note:</strong> implemented over FFAA command <code>0x0009</code> (query + set with payload <code>0/1</code>).</p>
 
 <h3>Default Input IDs</h3>
 <p>You can edit these in the web UI under <strong>FFAA input map</strong>.</p>
