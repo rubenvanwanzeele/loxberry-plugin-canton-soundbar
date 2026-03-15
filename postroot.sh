@@ -1,23 +1,7 @@
 #!/bin/bash
-# Post-install — runs as root
+# Post-install - runs as root
 # Creates, enables and starts the systemd service for the monitor daemon
 
-echo "<INFO> Ensuring adb is installed for LibreKNX auto-recovery..."
-if command -v adb >/dev/null 2>&1; then
-    echo "<OK> adb already installed ($(command -v adb))"
-else
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y >/dev/null 2>&1 || true
-    if apt-get install -y adb >/dev/null 2>&1; then
-        echo "<OK> Installed adb package"
-    elif apt-get install -y android-tools-adb >/dev/null 2>&1; then
-        echo "<OK> Installed android-tools-adb package"
-    else
-        echo "<WARNING> Could not install adb package in postroot."
-        echo "<WARNING> Install manually: sudo apt install -y adb"
-        echo "<WARNING> Or: sudo apt install -y android-tools-adb"
-    fi
-fi
 
 echo "<INFO> Installing Canton Smart Soundbar systemd service..."
 cat > /etc/systemd/system/cantonbar.service << 'EOF'

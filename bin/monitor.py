@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
-"""
-monitor.py — FFAA-based daemon for the Canton Smart Soundbar plugin.
-
-This version intentionally avoids the fragile LibreKNX HTTP control path for
-power/input/volume and instead uses the real control protocol confirmed on the
-device: FFAA over TCP port 50006.
-
-Confirmed on the Canton Smart Soundbar 10:
-  - Power off/on via CMD_POWER (0x0006)
-  - Volume via CMD_VOLUME (0x000C)
-  - Input switching via CMD_INPUT_MODE (0x0003)
-
-Mute has not yet been identified on FFAA, so mute state/commands are published
-as "unsupported" instead of pretending to work.
-"""
+"""monitor.py — FFAA-based daemon for the Canton Smart Soundbar plugin."""
 
 from __future__ import annotations
 
@@ -30,6 +16,9 @@ import threading
 import time
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
+from urllib.parse import urlencode
+
+import requests
 
 try:
     import paho.mqtt.client as mqtt
@@ -50,6 +39,7 @@ _last_mute = ""
 _last_input = ""
 _last_input_name = ""
 _last_input_map_json = ""
+_last_sound_mode_text = ""
 
 _last_volume_raw = 0
 _last_volume_max = 70
@@ -58,9 +48,21 @@ _last_sound_mode = 2
 _logged_unknown_inputs: set[str] = set()
 
 SOUND_MODE_NAMES = {1: "Stereo", 2: "Movie", 3: "Music"}
+SOUND_MODE_COMMANDS = {
+    "stereo": 1,
+    "movie": 2,
+    "music": 3,
+}
 DEFAULT_INPUT_MAPPINGS = {
     "0": "17,13,NET",
+    "1": "01,03,BDP",
+    "2": "02,04,SAT",
     "3": "06,02,ARC",
+    "4": "03,0E,CD",
+    "5": "07,05,DVD",
+    "6": "0F,12,AUX",
+    "7": "15,14,BT",
+    "8": "0B,06,COAX",
 }
 
 
@@ -247,6 +249,36 @@ def find_mapping_by_bytes(byte1: int, byte2: int, mappings: dict[str, InputMappi
     return None
 
 
+def sanitize_name_token(value: str) -> str:
+    cleaned = []
+    for ch in (value or "").strip().lower():
+        if ch.isalnum():
+            cleaned.append(ch)
+    return "".join(cleaned)
+
+
+def find_mapping_by_alias(alias: str, mappings: dict[str, InputMapping]) -> InputMapping | None:
+    token = sanitize_name_token(alias)
+    if not token:
+        return None
+    for mapping in mappings.values():
+        if sanitize_name_token(mapping.name) == token:
+            return mapping
+    return None
+
+
+def parse_sound_mode_from_command(cmd: str) -> int | None:
+    if not cmd:
+        return None
+    if cmd.startswith("mode_"):
+        return SOUND_MODE_COMMANDS.get(cmd[5:])
+    if cmd.startswith("playmode_"):
+        return SOUND_MODE_COMMANDS.get(cmd[9:])
+    if cmd.startswith("play_mode_"):
+        return SOUND_MODE_COMMANDS.get(cmd[10:])
+    return None
+
+
 def raw_volume_to_percent(level: int, maximum: int) -> int:
     maximum = max(1, int(maximum or 70))
     return max(0, min(100, round((int(level) * 100) / maximum)))
@@ -263,6 +295,62 @@ def ffaa_client() -> FfaaClient:
     port = _config.getint("SOUNDBAR", "PORT", fallback=50006) if _config else 50006
     timeout = max(1, _config.getint("MONITOR", "STATUS_TIMEOUT", fallback=2) if _config else 2)
     return FfaaClient(ip, port, timeout=float(timeout))
+
+
+def legacy_http_enabled() -> bool:
+    if not _config:
+        return True
+    return _config.getboolean("LEGACY_HTTP", "ENABLE_MUTE_FALLBACK", fallback=True)
+
+
+def legacy_http_base_url() -> str:
+    ip = (_config.get("SOUNDBAR", "IP", fallback="") if _config else "").strip()
+    port = _config.getint("LEGACY_HTTP", "PORT", fallback=1904) if _config else 1904
+    path = (_config.get("LEGACY_HTTP", "PATH", fallback="/canton") if _config else "/canton").strip() or "/canton"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"http://{ip}:{port}{path}"
+
+
+def legacy_http_status_timeout() -> float:
+    return float(_config.getint("LEGACY_HTTP", "STATUS_TIMEOUT", fallback=2) if _config else 2)
+
+
+def legacy_http_get(action: str) -> dict | None:
+    if not legacy_http_enabled():
+        return None
+    try:
+        url = f"{legacy_http_base_url()}?{urlencode({'action': action})}"
+        response = requests.get(url, timeout=legacy_http_status_timeout())
+        if response.status_code != 200:
+            return None
+        payload = response.json()
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def legacy_http_post(action: str, body: dict) -> bool:
+    if not legacy_http_enabled():
+        return False
+    try:
+        url = f"{legacy_http_base_url()}?{urlencode({'action': action})}"
+        response = requests.post(url, json=body, timeout=legacy_http_status_timeout())
+        payload = response.json() if response.status_code == 200 else {}
+        return isinstance(payload, dict) and int(payload.get("status", 0)) == 101
+    except Exception:
+        return False
+
+
+def get_mute_state() -> str:
+    payload = legacy_http_get("status")
+    if not payload or "MuteStatus" not in payload:
+        return "unsupported"
+    return "on" if bool(payload.get("MuteStatus")) else "off"
+
+
+def set_mute_state(target: bool) -> bool:
+    return legacy_http_post("mute", {"mute": bool(target)})
 
 
 def _publish(topic: str, value: str, retain: bool = True) -> None:
@@ -290,7 +378,7 @@ def get_soundbar_state() -> dict:
         return {
             "power": fallback_power,
             "volume": fallback_volume,
-            "mute": "unsupported",
+            "mute": _last_mute if _last_mute in ("on", "off") else "unsupported",
             "input": fallback_input,
             "input_name": fallback_input_name,
             "sound_mode": SOUND_MODE_NAMES.get(_last_sound_mode, f"Mode {_last_sound_mode}"),
@@ -326,10 +414,14 @@ def get_soundbar_state() -> dict:
             log.info(f"Discovered unmapped FFAA input tuple {key} (mode={triple[2] if len(triple) > 2 else '?'})")
             _logged_unknown_inputs.add(key)
 
+    mute = get_mute_state()
+    if mute == "unsupported" and _last_mute in ("on", "off"):
+        mute = _last_mute
+
     return {
         "power": power,
         "volume": raw_volume_to_percent(volume_raw, volume_max),
-        "mute": "unsupported",
+        "mute": mute,
         "input": input_value,
         "input_name": input_name,
         "sound_mode": SOUND_MODE_NAMES.get(sound_mode, f"Mode {sound_mode}"),
@@ -339,7 +431,7 @@ def get_soundbar_state() -> dict:
 
 
 def publish_state(state: dict) -> None:
-    global _last_state, _last_volume, _last_mute, _last_input, _last_input_name, _last_input_map_json
+    global _last_state, _last_volume, _last_mute, _last_input, _last_input_name, _last_input_map_json, _last_sound_mode_text
 
     state_topic = _config.get("MQTT", "STATE_TOPIC", fallback="loxberry/plugin/cantonbar/state")
     volume_topic = _config.get("MQTT", "VOLUME_TOPIC", fallback="loxberry/plugin/cantonbar/volume")
@@ -347,12 +439,14 @@ def publish_state(state: dict) -> None:
     input_topic = _config.get("MQTT", "INPUT_TOPIC", fallback="loxberry/plugin/cantonbar/input")
     input_name_topic = _config.get("MQTT", "INPUT_NAME_TOPIC", fallback="loxberry/plugin/cantonbar/input_name")
     input_map_topic = _config.get("MQTT", "INPUT_MAP_TOPIC", fallback="loxberry/plugin/cantonbar/input_map")
+    mode_topic = _config.get("MQTT", "SOUND_MODE_TOPIC", fallback="loxberry/plugin/cantonbar/sound_mode")
 
     power = state["power"]
     volume = str(state["volume"])
     mute = state.get("mute", "unsupported")
     inp = state["input"]
     inp_name = state.get("input_name", "Unknown")
+    sound_mode = state.get("sound_mode", "Unknown")
     input_map_json = state.get("_input_map_json", "{}")
 
     if power != _last_state:
@@ -384,12 +478,18 @@ def publish_state(state: dict) -> None:
         _publish(input_map_topic, input_map_json)
         _last_input_map_json = input_map_json
 
+    if sound_mode != _last_sound_mode_text:
+        _publish(mode_topic, sound_mode)
+        log.info(f"Sound mode → {sound_mode!r}")
+        _last_sound_mode_text = sound_mode
+
 
 def republish_all() -> None:
-    global _last_state, _last_volume, _last_mute, _last_input, _last_input_name, _last_input_map_json
+    global _last_state, _last_volume, _last_mute, _last_input, _last_input_name, _last_input_map_json, _last_sound_mode_text
     _last_state = _last_volume = _last_mute = _last_input = ""
     _last_input_name = ""
     _last_input_map_json = ""
+    _last_sound_mode_text = ""
 
 
 def current_sound_mode() -> int:
@@ -438,6 +538,10 @@ def on_mqtt_message(client, userdata, msg) -> None:
 
 def handle_command(cmd: str) -> None:
     try:
+        cmd = (cmd or "").strip().lower()
+        if not cmd:
+            return
+
         client = ffaa_client()
         mappings = load_input_mappings()
 
@@ -482,12 +586,32 @@ def handle_command(cmd: str) -> None:
             return
 
         if cmd in ("mute_on", "mute_off", "mute_toggle"):
-            log.warning(f"{cmd} ignored: mute is not yet reverse-engineered on the pure FFAA backend")
+            if cmd == "mute_toggle":
+                current = _last_mute if _last_mute in ("on", "off") else get_mute_state()
+                target = current != "on"
+            else:
+                target = cmd == "mute_on"
+
+            if set_mute_state(target):
+                log.info(f"Mute set via legacy HTTP fallback: {'on' if target else 'off'}")
+            else:
+                log.warning("Mute command failed (legacy HTTP fallback disabled or unavailable)")
+            return
+
+        mode = parse_sound_mode_from_command(cmd)
+        if mode:
+            state = client.query_state(include_supported_inputs=False)
+            byte1 = int(state.get("input_b1") if state.get("input_b1") is not None else _last_input_bytes[0])
+            byte2 = int(state.get("input_b2") if state.get("input_b2") is not None else _last_input_bytes[1])
+            response = client.set_input(byte1, byte2, mode)
+            log.info(f"Sound mode change (FFAA): input {byte1:02X},{byte2:02X} → mode {mode}: {response}")
             return
 
         if cmd.startswith("input_"):
             source_id = cmd[6:]
             mapping = mappings.get(source_id)
+            if not mapping:
+                mapping = find_mapping_by_alias(source_id, mappings)
             if not mapping:
                 log.warning(f"{cmd} ignored: no FFAA mapping configured for source {source_id!r}")
                 return
