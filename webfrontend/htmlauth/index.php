@@ -67,6 +67,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'status') {
     $mute_t     = $plugin_cfg['MQTT']['MUTE_TOPIC']   ?? 'loxberry/plugin/cantonbar/mute';
     $input_t    = $plugin_cfg['MQTT']['INPUT_TOPIC']  ?? 'loxberry/plugin/cantonbar/input';
     $input_name_t = $plugin_cfg['MQTT']['INPUT_NAME_TOPIC'] ?? 'loxberry/plugin/cantonbar/input_name';
+    $input_map_t  = $plugin_cfg['MQTT']['INPUT_MAP_TOPIC'] ?? 'loxberry/plugin/cantonbar/input_map';
     $health_base = $plugin_cfg['MQTT']['HEALTH_BASE_TOPIC'] ?? 'loxberry/plugin/cantonbar/health';
     $api_health_t = $plugin_cfg['MQTT']['API_HEALTH_TOPIC'] ?? ($health_base . '/api');
     $adb_health_t = $plugin_cfg['MQTT']['ADB_HEALTH_TOPIC'] ?? ($health_base . '/adb');
@@ -80,6 +81,7 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'status') {
         'mute'    => mqsub($mq, $mute_t)   ?: '-',
         'input'   => mqsub($mq, $input_t)  ?: '-',
         'input_name' => mqsub($mq, $input_name_t) ?: '-',
+        'input_map' => mqsub($mq, $input_map_t) ?: '',
         'api'     => mqsub($mq, $api_health_t) ?: 'unknown',
         'adb'     => mqsub($mq, $adb_health_t) ?: 'unknown',
         'libreknx'=> mqsub($mq, $libreknx_health_t) ?: 'unknown',
@@ -342,7 +344,7 @@ LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
             <label class="col-sm-4 col-form-label">MAC Address <small class="text-muted">(WoL)</small></label>
             <div class="col-sm-5">
                 <input type="text" name="sb_mac" class="form-control" value="<?= htmlspecialchars($sb_mac) ?>" placeholder="auto-discovered">
-                <small class="form-text text-muted">Leave blank to auto-discover via ARP on save. Required for <code>power_on</code>.</small>
+                <small class="form-text text-muted">Leave blank to auto-discover from <code>action=info</code> on save. Required for <code>power_on</code>.</small>
             </div>
         </div>
         <div class="form-group row">
@@ -407,7 +409,7 @@ LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
             <div class="col-sm-2">
                 <input type="number" name="status_timeout" class="form-control" value="<?= (int)$status_timeout ?>" min="1" max="10">
             </div>
-            <div class="col-sm-6"><small class="form-text text-muted">Timeout for <code>action=status</code>. Lower values reduce UI lag if LibreKNX hangs.</small></div>
+            <div class="col-sm-6"><small class="form-text text-muted">Timeout for audio status polling (<code>action=volumeStatus</code>, legacy fallback <code>action=status</code>).</small></div>
         </div>
         <div class="form-group row">
             <label class="col-sm-4 col-form-label">API failure threshold</label>
@@ -447,7 +449,7 @@ LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
                     <input class="form-check-input" type="checkbox" name="enable_input_switching" id="enable_input_switching" value="1"<?= $enable_input_switching ? ' checked' : '' ?>>
                     <label class="form-check-label" for="enable_input_switching">Enable input_N commands</label>
                 </div>
-                <small class="form-text text-muted">Disabled by default because tested input actions are currently unverified and may crash LibreKNX.</small>
+                <small class="form-text text-muted">Enables <code>input_N</code> commands via LUCI (<code>MID 245 INPUTSOURCE:N</code>).</small>
             </div>
         </div>
         <div class="form-group row">
@@ -476,7 +478,7 @@ LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
         <input type="hidden" name="action" value="test_cmd">
         <div class="d-flex flex-wrap" style="gap:6px;">
             <button type="submit" name="test_cmd" value="power_on"    class="btn btn-success">Power On (WoL)</button>
-            <button type="submit" name="test_cmd" value="power_off"   class="btn btn-danger"<?= $enable_power_off ? '' : ' disabled title="Enable Experimental power off in Configuration first"' ?>>Standby</button>
+            <button type="submit" name="test_cmd" value="power_off"   class="btn btn-danger">Standby</button>
             <button type="submit" name="test_cmd" value="volume_up"   class="btn btn-secondary">Vol +</button>
             <button type="submit" name="test_cmd" value="volume_down" class="btn btn-secondary">Vol −</button>
             <button type="submit" name="test_cmd" value="mute_on"     class="btn btn-warning">Mute</button>
@@ -486,8 +488,21 @@ LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
         </form>
 
         <div class="small text-muted mb-3">
-            <strong>Note:</strong> <code>power_off</code> and <code>input_N</code> are experimental and disabled by default because current LibreKNX behavior can crash the API.
+            <strong>Note:</strong> <code>power_off</code> tries LUCI standby first. HTTP fallback stays guarded by <code>Experimental power off</code>.
         </div>
+
+        <form method="post" id="input-buttons-form" class="mb-3">
+        <input type="hidden" name="action" value="test_cmd">
+        <input type="hidden" name="test_cmd" id="input-buttons-cmd" value="">
+        <label class="d-block mb-2"><strong>Input Source Buttons</strong></label>
+        <div id="input-buttons" class="d-flex flex-wrap" style="gap:6px;">
+            <span class="text-muted small">Waiting for source map...</span>
+        </div>
+        <small class="form-text text-muted">
+            Uses discovered sources from <code><?= htmlspecialchars($input_map_topic) ?></code> and sends <code>input_N</code> commands.
+            <?= $enable_input_switching ? '' : 'Enable Experimental input switching in Configuration to activate these buttons.' ?>
+        </small>
+        </form>
 
         <!-- Custom command: separate form, different field name -->
         <form method="post" class="mb-3">
@@ -534,12 +549,107 @@ if (file_exists($logfile) && filesize($logfile) > 0) {
 </div><!-- /container-fluid -->
 
 <script>
+var inputSwitchEnabled = <?= $enable_input_switching ? 'true' : 'false' ?>;
+
 function healthBadgeClass(v) {
     if (v === 'up' || v === 'running' || v === 'connected' || v === 'ok') return 'badge-success';
     if (v === 'recovering' || v === 'restarting') return 'badge-warning';
     if (v === 'disabled') return 'badge-info';
     if (v === 'unknown') return 'badge-secondary';
     return 'badge-danger';
+}
+
+function htmlEscape(s) {
+    return String(s || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function normalizeInputToken(rawName) {
+    return String(rawName || '')
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+}
+
+function translatedInputLabel(rawName, sourceId) {
+    var token = normalizeInputToken(rawName);
+    var map = {
+        HDMI_ARC: 'HDMI ARC',
+        HDMI: 'HDMI',
+        TV: 'TV',
+        BLUETOOTH: 'Bluetooth',
+        BT: 'Bluetooth',
+        AUX: 'AUX',
+        ANALOG: 'Analog',
+        OPTICAL: 'Optical',
+        SPDIF: 'Optical',
+        USB: 'USB',
+        AIRPLAY: 'AirPlay',
+        SPOTIFY: 'Spotify Connect',
+        CHROMECAST: 'Chromecast'
+    };
+    if (map[token]) {
+        return map[token];
+    }
+    if (rawName && String(rawName).trim() !== '') {
+        return String(rawName).replace(/_/g, ' ');
+    }
+    return 'Source ' + sourceId;
+}
+
+function renderInputButtons(inputMapRaw, currentInput) {
+    var holder = document.getElementById('input-buttons');
+    if (!holder) return;
+
+    var parsed = {};
+    if (inputMapRaw && typeof inputMapRaw === 'string') {
+        try {
+            parsed = JSON.parse(inputMapRaw);
+        } catch (e) {
+            parsed = {};
+        }
+    }
+
+    var ids = Object.keys(parsed).sort(function(a, b) {
+        var ai = parseInt(a, 10);
+        var bi = parseInt(b, 10);
+        if (!isNaN(ai) && !isNaN(bi)) return ai - bi;
+        return String(a).localeCompare(String(b));
+    });
+
+    if (!ids.length) {
+        holder.innerHTML = '<span class="text-muted small">No source map received yet.</span>';
+        return;
+    }
+
+    var current = String(currentInput || '');
+    var html = '';
+    ids.forEach(function(id) {
+        var rawName = parsed[id];
+        var label = translatedInputLabel(rawName, id);
+        var active = String(id) === current;
+        var cls = active ? 'btn-primary' : 'btn-outline-primary';
+        var disabled = inputSwitchEnabled ? '' : ' disabled';
+        var title = inputSwitchEnabled ? '' : ' title="Enable Experimental input switching first"';
+        html += '<button type="button" class="btn btn-sm ' + cls + '" data-input-source="' + htmlEscape(id) + '"' + disabled + title + '>'
+             + htmlEscape(label)
+             + ' <small class="text-monospace">(' + htmlEscape(id) + ')</small>'
+             + '</button>';
+    });
+    holder.innerHTML = html;
+}
+
+function sendInputCommand(sourceId) {
+    if (!inputSwitchEnabled) return;
+    var cmdField = document.getElementById('input-buttons-cmd');
+    var form = document.getElementById('input-buttons-form');
+    if (!cmdField || !form) return;
+    cmdField.value = 'input_' + sourceId;
+    form.submit();
 }
 
 function updateStatus() {
@@ -564,6 +674,7 @@ function updateStatus() {
             } else {
                 document.getElementById('st-input').textContent = '–';
             }
+            renderInputButtons(d.input_map || '', d.input || '');
 
             document.getElementById('st-api').innerHTML =
                 '<span class="badge ' + healthBadgeClass(d.api) + ' badge-pill px-3 py-2">' + String(d.api).toUpperCase() + '</span>';
@@ -578,6 +689,11 @@ function updateStatus() {
         })
         .catch(function() {});
 }
+document.addEventListener('click', function(ev) {
+    var btn = ev.target.closest('button[data-input-source]');
+    if (!btn) return;
+    sendInputCommand(btn.getAttribute('data-input-source'));
+});
 updateStatus();
 setInterval(updateStatus, 5000);
 <?php if ($refresh_after_cmd): ?>

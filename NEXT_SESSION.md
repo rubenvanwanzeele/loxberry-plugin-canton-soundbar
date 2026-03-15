@@ -1,5 +1,28 @@
 # Next Session Handoff
 
+## 2026-03-15 Checkpoint (latest)
+
+- Verified from Linux host against `192.168.1.20`:
+  - `adb shell LUCI_local 70 STANDBYON` / `STANDBYOFF` reliably toggles power.
+  - `adb shell LUCI_local 245 INPUTSOURCE:N` reliably switches input (tested `3`, `7`, `8`).
+  - `GET action=sources` is stable and returns mapping (`ARC=3`, `AUX=1`, `BT=2`, `...`).
+  - `GET action=status` remains unstable (frequent timeouts).
+  - `GET action=volumeStatus` is better but still intermittent and appears stale on this firmware.
+- `bin/monitor.py` updated to:
+  - Prefer `volumeStatus` with fallback to `status` for mute/volume polling.
+  - Use LUCI MID 245 for `input_N` commands (HTTP input is now explicit fallback only).
+  - Use the same audio-status helper for `volume_up`, `volume_down`, and `mute_toggle`.
+- `webfrontend/htmlauth/index.php` text updated to reflect LUCI input switching and `volumeStatus` polling.
+
+### Next validation focus
+
+1. Verify on LoxBerry that `input_N` works end-to-end through MQTT using LUCI path.
+2. Confirm power transitions in UI/logs now match physical state after LUCI `STANDBYON/OFF`.
+3. Decide how to treat stale/intermittent volume reads (`volumeStatus`) for published MQTT state:
+   - keep local command override,
+   - increase timeout,
+   - or move to LUCI-derived state in a future iteration.
+
 ## 2026-03-14 Checkpoint (latest)
 
 - `bin/monitor.py` now includes a post-power-command transition window with target tracking.

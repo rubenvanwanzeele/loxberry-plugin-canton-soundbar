@@ -6,13 +6,14 @@ Polls the soundbar every POLL_INTERVAL seconds via the LibreKNX HTTP API
 (port 1904) and publishes state to MQTT. Handles commands from Loxone.
 
 API used:
-  GET  http://<IP>:1904/canton?action=status       → Volume, MuteStatus, PlayStatus
+  GET  http://<IP>:1904/canton?action=volumeStatus → Volume, MuteStatus
+  GET  http://<IP>:1904/canton?action=status       → Legacy full status (fallback)
   GET  http://<IP>:1904/canton?action=powerstatus  → PowerStatus: ON | STANDBY
   GET  http://<IP>:1904/canton?action=input        → InputSource: N
   POST http://<IP>:1904/canton?action=mute         body: {"mute": true/false}
   POST http://<IP>:1904/canton?action=volume       body: {"volume": 0-100}
   POST http://<IP>:1904/canton?action=standby      body: {"standby": true}  (to verify)
-  POST http://<IP>:1904/canton?action=input        body: {"inputsource": "N"} (to verify)
+  LUCI adb MID 245 payload INPUTSOURCE:N           → Input switch (preferred)
 
 Wake-on-LAN is used for power_on when soundbar is in standby.
 
@@ -245,6 +246,40 @@ def refresh_source_map(force: bool = False) -> None:
 
 def input_name_for(value: str) -> str:
     return _source_map.get(str(value), f"SRC_{value}")
+
+
+def get_audio_status(timeout: int | None = None) -> dict:
+    """Read current volume/mute, preferring the faster volumeStatus action."""
+    req_timeout = timeout if timeout is not None else _config.getint("MONITOR", "STATUS_TIMEOUT", fallback=2)
+
+    data = api_get("volumeStatus", timeout=req_timeout)
+    if isinstance(data, dict) and data:
+        vol = data.get("Volume", data.get("volume"))
+        mute = data.get("MuteStatus", data.get("muteStatus"))
+        try:
+            return {
+                "volume": max(0, min(100, int(vol))),
+                "mute": "on" if bool(mute) else "off",
+                "source": "volumeStatus",
+            }
+        except (TypeError, ValueError):
+            pass
+
+    # Fallback for older/unstable builds where volumeStatus is unavailable.
+    data = api_get("status", timeout=req_timeout)
+    if isinstance(data, dict) and data:
+        vol = data.get("Volume", data.get("volume"))
+        mute = data.get("MuteStatus", data.get("muteStatus"))
+        try:
+            return {
+                "volume": max(0, min(100, int(vol))),
+                "mute": "on" if bool(mute) else "off",
+                "source": "status",
+            }
+        except (TypeError, ValueError):
+            pass
+
+    return {}
 
 
 def _normalize_power_status(value: str) -> str:
@@ -593,11 +628,10 @@ def get_soundbar_state() -> dict:
 
     refresh_source_map()
 
-    status_timeout = _config.getint("MONITOR", "STATUS_TIMEOUT", fallback=2)
-    status = api_get("status", timeout=status_timeout)
-    if status:
-        state["volume"] = int(status.get("Volume", 0))
-        state["mute"] = "on" if status.get("MuteStatus", False) else "off"
+    audio = get_audio_status()
+    if audio:
+        state["volume"] = int(audio["volume"])
+        state["mute"] = audio["mute"]
 
     override_volume = get_volume_override()
     if override_volume is not None and state["power"] == "on":
@@ -729,32 +763,36 @@ def handle_command(cmd: str) -> None:
                 _trace_publish("error", payload, retain=True)
 
         if cmd == "power_on":
-            # Prefer the verified internal standby-off control path via LUCI.
-            if ip and _adb_connect(ip) and _send_luci_local(ip, 70, "STANDBYOFF"):
+            # Send WoL first when possible, then try LUCI standby-off as a second path.
+            # This helps both deep-standby wakeups and regular standby transitions.
+            wol_mac = resolve_wol_mac()
+            wol_sent = False
+            if wol_mac:
+                wakeonlan.send_magic_packet(wol_mac)
+                log.info(f"Wake-on-LAN sent to {wol_mac}")
+                wol_sent = True
+
+            luci_ok = bool(ip) and _adb_connect(ip) and _send_luci_local(ip, 70, "STANDBYOFF")
+            if luci_ok:
                 log.info("Power on requested via LUCI STANDBYOFF")
+
+            if wol_sent or luci_ok:
                 start_power_transition("on")
-                cmd_done(True, {"action": "adb_standbyoff"})
+                cmd_done(True, {"action": "power_on", "wol": wol_sent, "luci": luci_ok, "mac": wol_mac})
             else:
-                wol_mac = resolve_wol_mac()
-                if wol_mac:
-                    wakeonlan.send_magic_packet(wol_mac)
-                    log.info(f"Wake-on-LAN sent to {wol_mac}")
-                    start_power_transition("on")
-                    cmd_done(True, {"action": "wol", "mac": wol_mac})
-                else:
-                    log.warning("power_on failed: LUCI standby-off unavailable and no valid MAC for WoL")
-                    cmd_done(False, {"action": "power_on", "error": "no_luci_no_wol_mac"})
+                log.warning("power_on failed: no valid MAC for WoL and LUCI standby-off unavailable")
+                cmd_done(False, {"action": "power_on", "error": "no_wol_mac_no_luci"})
 
         elif cmd == "power_off":
-            if not _config.getboolean("EXPERIMENTAL", "ENABLE_POWER_OFF", fallback=False):
-                log.warning("power_off ignored: network standby is not verified for this device and is disabled by default")
-                cmd_done(False, {"action": "standby", "error": "disabled_by_config"})
-                return
             if ip and _adb_connect(ip) and _send_luci_local(ip, 70, "STANDBYON"):
                 log.info("Standby requested via LUCI STANDBYON")
                 start_power_transition("standby")
                 cmd_done(True, {"action": "adb_standbyon"})
             else:
+                if not _config.getboolean("EXPERIMENTAL", "ENABLE_POWER_OFF", fallback=False):
+                    log.warning("power_off failed: LUCI standby unavailable and HTTP fallback is disabled by config")
+                    cmd_done(False, {"action": "standby", "error": "luci_failed_http_fallback_disabled"})
+                    return
                 # Last resort: legacy HTTP standby (known unreliable on this firmware).
                 result = api_post("standby", {"standby": True})
                 log.info(f"Standby (HTTP fallback): {result}")
@@ -779,8 +817,13 @@ def handle_command(cmd: str) -> None:
                 cmd_done(False, {"action": "volume_set", "error": "invalid_command"})
 
         elif cmd == "volume_up":
-            status = api_get("status")
-            current = get_volume_override() or int(status.get("Volume", 50))
+            audio = get_audio_status()
+            current = get_volume_override()
+            if current is None:
+                if audio:
+                    current = int(audio["volume"])
+                else:
+                    current = int(_last_volume) if _last_volume.isdigit() else 50
             step = _config.getint("SOUNDBAR", "VOLUME_STEP", fallback=5)
             new_vol = min(100, current + step)
             result = api_post("volume", {"volume": new_vol})
@@ -792,8 +835,13 @@ def handle_command(cmd: str) -> None:
             cmd_done(api_ok(result), {"action": "volume_up", "from": current, "to": new_vol, "response": result})
 
         elif cmd == "volume_down":
-            status = api_get("status")
-            current = get_volume_override() or int(status.get("Volume", 50))
+            audio = get_audio_status()
+            current = get_volume_override()
+            if current is None:
+                if audio:
+                    current = int(audio["volume"])
+                else:
+                    current = int(_last_volume) if _last_volume.isdigit() else 50
             step = _config.getint("SOUNDBAR", "VOLUME_STEP", fallback=5)
             new_vol = max(0, current - step)
             result = api_post("volume", {"volume": new_vol})
@@ -821,8 +869,8 @@ def handle_command(cmd: str) -> None:
             cmd_done(api_ok(result), {"action": "mute_off", "response": result})
 
         elif cmd == "mute_toggle":
-            status = api_get("status")
-            currently_muted = status.get("MuteStatus", False)
+            audio = get_audio_status()
+            currently_muted = (audio.get("mute") == "on") if audio else (_last_mute == "on")
             result = api_post("mute", {"mute": not currently_muted})
             log.info(f"Mute toggle (was {currently_muted}): {result}")
             cmd_done(api_ok(result), {"action": "mute_toggle", "was": bool(currently_muted), "response": result})
@@ -832,17 +880,29 @@ def handle_command(cmd: str) -> None:
                 log.warning(f"{cmd} ignored: input switching is not verified for this device and is disabled by default")
                 cmd_done(False, {"action": "input_switch", "error": "disabled_by_config"})
                 return
-            if not _config.getboolean("EXPERIMENTAL", "ENABLE_UNSAFE_HTTP_INPUT", fallback=False):
-                log.warning(f"{cmd} ignored: unsafe HTTP input switching is disabled (it currently destabilizes LibreKNX on this firmware)")
-                cmd_done(False, {"action": "input_switch", "error": "unsafe_http_input_disabled"})
-                return
             source = cmd[6:]  # "input_3" → "3"
-            # Try capitalized key first (as hinted by NEXT_SESSION), then lowercase fallback.
+            if not source.isdigit():
+                log.warning(f"{cmd} ignored: invalid source id")
+                cmd_done(False, {"action": "input_switch", "error": "invalid_source"})
+                return
+
+            luci_ok = bool(ip) and _adb_connect(ip) and _send_luci_local(ip, 245, f"INPUTSOURCE:{source}")
+            if luci_ok:
+                log.info(f"Input switched via LUCI to source {source}")
+                cmd_done(True, {"action": "input_switch_luci", "target": source})
+                return
+
+            if not _config.getboolean("EXPERIMENTAL", "ENABLE_UNSAFE_HTTP_INPUT", fallback=False):
+                log.warning(f"{cmd} failed: LUCI input switch unavailable and unsafe HTTP fallback disabled")
+                cmd_done(False, {"action": "input_switch", "error": "luci_failed_http_fallback_disabled"})
+                return
+
+            # Last resort: known unstable on this firmware, keep opt-in only.
             result = api_post("input", {"InputSource": source})
             if not api_ok(result):
                 result = api_post("input", {"inputsource": source})
-            log.info(f"Input → {source!r}: {result}")
-            cmd_done(api_ok(result), {"action": "input_switch", "target": source, "response": result})
+            log.info(f"Input HTTP fallback → {source!r}: {result}")
+            cmd_done(api_ok(result), {"action": "input_switch_http_fallback", "target": source, "response": result})
 
         else:
             log.warning(f"Unknown command: {cmd!r}")
