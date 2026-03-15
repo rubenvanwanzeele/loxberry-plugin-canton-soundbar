@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
 """
-monitor.py — Main daemon for Canton Smart Soundbar LoxBerry plugin.
+monitor.py — FFAA-based daemon for the Canton Smart Soundbar plugin.
 
-Polls the soundbar every POLL_INTERVAL seconds via the LibreKNX HTTP API
-(port 1904) and publishes state to MQTT. Handles commands from Loxone.
+This version intentionally avoids the fragile LibreKNX HTTP control path for
+power/input/volume and instead uses the real control protocol confirmed on the
+device: FFAA over TCP port 50006.
 
-API used:
-  GET  http://<IP>:1904/canton?action=volumeStatus → Volume, MuteStatus
-  GET  http://<IP>:1904/canton?action=status       → Legacy full status (fallback)
-  GET  http://<IP>:1904/canton?action=powerstatus  → PowerStatus: ON | STANDBY
-  GET  http://<IP>:1904/canton?action=input        → InputSource: N
-  POST http://<IP>:1904/canton?action=mute         body: {"mute": true/false}
-  POST http://<IP>:1904/canton?action=volume       body: {"volume": 0-100}
-  POST http://<IP>:1904/canton?action=standby      body: {"standby": true}  (to verify)
-  LUCI adb MID 245 payload INPUTSOURCE:N           → Input switch (preferred)
+Confirmed on the Canton Smart Soundbar 10:
+  - Power off/on via CMD_POWER (0x0006)
+  - Volume via CMD_VOLUME (0x000C)
+  - Input switching via CMD_INPUT_MODE (0x0003)
 
-Wake-on-LAN is used for power_on when soundbar is in standby.
-
-Usage:
-    python3 monitor.py --config /path/to/cantonbar.cfg --logfile /path/to/monitor.log
+Mute has not yet been identified on FFAA, so mute state/commands are published
+as "unsupported" instead of pretending to work.
 """
+
+from __future__ import annotations
 
 import argparse
 import configparser
@@ -27,14 +23,13 @@ import json
 import logging
 import os
 import signal
-import shutil
-import subprocess
+import socket
+import struct
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
-
-import requests
 
 try:
     import paho.mqtt.client as mqtt
@@ -42,647 +37,328 @@ except ImportError:
     print("ERROR: paho-mqtt not installed. Run: pip3 install paho-mqtt")
     sys.exit(1)
 
-try:
-    import wakeonlan
-except ImportError:
-    print("ERROR: wakeonlan not installed. Run: pip3 install wakeonlan")
-    sys.exit(1)
-
-
-# ---------------------------------------------------------------------------
-# Globals
-# ---------------------------------------------------------------------------
 
 log = logging.getLogger("cantonbar")
 
-_config: configparser.ConfigParser = None
-_mqtt_client: mqtt.Client = None
+_config: configparser.ConfigParser | None = None
+_mqtt_client: mqtt.Client | None = None
 _shutdown = threading.Event()
-_api_lock = threading.Lock()
 
-# Health / recovery runtime state
-_api_fail_streak = 0
-_last_recovery_ts = 0.0
-_health = {
-    "api": "unknown",
-    "adb": "unknown",
-    "libreknx": "unknown",
-    "token": "unknown",
-    "token_value": "",
+_last_state = ""
+_last_volume = ""
+_last_mute = ""
+_last_input = ""
+_last_input_name = ""
+_last_input_map_json = ""
+
+_last_volume_raw = 0
+_last_volume_max = 70
+_last_input_bytes = (0, 0)
+_last_sound_mode = 2
+_logged_unknown_inputs: set[str] = set()
+
+SOUND_MODE_NAMES = {1: "Stereo", 2: "Movie", 3: "Music"}
+DEFAULT_INPUT_MAPPINGS = {
+    "0": "17,13,NET",
+    "3": "06,02,ARC",
 }
-_last_health_pub = {
-    "api": "",
-    "adb": "",
-    "libreknx": "",
-    "token": "",
-}
-
-# Last published values — only publish on change
-_last_state: str = ""
-_last_volume: str = ""
-_last_mute: str = ""
-_last_input: str = ""
-_last_input_name: str = ""
-_volume_override: int | None = None
-_volume_override_ts: float = 0.0
-_trace_seq = 0
-_source_map: dict[str, str] = {}
-_source_map_ts: float = 0.0
-_last_input_map_json: str = ""
-_power_transition_until: float = 0.0
-_power_transition_target: str = ""
-_power_transition_noted: bool = False
 
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class InputMapping:
+    source_id: str
+    byte1: int
+    byte2: int
+    name: str
+
+
+class FfaaClient:
+    CMD_STATUS = 0x0002
+    CMD_INPUT_MODE = 0x0003
+    CMD_POWER = 0x0006
+    CMD_VOLUME = 0x000C
+
+    def __init__(self, host: str, port: int, timeout: float = 2.0) -> None:
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def build_frame(cmd: int, type_byte: int, data: bytes = b"") -> bytes:
+        return b"\xff\xaa" + struct.pack(">H", cmd) + bytes([type_byte]) + struct.pack(">H", len(data)) + data
+
+    @staticmethod
+    def parse_frames(raw: bytes) -> list[dict]:
+        frames: list[dict] = []
+        pos = 0
+        while pos + 7 <= len(raw):
+            if raw[pos : pos + 2] != b"\xff\xaa":
+                idx = raw.find(b"\xff\xaa", pos + 1)
+                if idx < 0:
+                    break
+                pos = idx
+                continue
+
+            cmd = struct.unpack(">H", raw[pos + 2 : pos + 4])[0]
+            typ = raw[pos + 4]
+            dlen = struct.unpack(">H", raw[pos + 5 : pos + 7])[0]
+            if pos + 7 + dlen > len(raw):
+                break
+            data = raw[pos + 7 : pos + 7 + dlen]
+            frames.append({"cmd": cmd, "type": typ, "data": data})
+            pos += 7 + dlen
+        return frames
+
+    def transact(self, payload: bytes, settle_s: float = 0.25) -> list[dict]:
+        with self._lock:
+            with socket.create_connection((self.host, self.port), timeout=self.timeout) as sock:
+                sock.settimeout(self.timeout)
+                sock.sendall(payload)
+                time.sleep(settle_s)
+
+                chunks: list[bytes] = []
+                while True:
+                    try:
+                        data = sock.recv(4096)
+                        if not data:
+                            break
+                        chunks.append(data)
+                        if len(data) < 4096:
+                            sock.settimeout(0.15)
+                    except socket.timeout:
+                        break
+
+        raw = b"".join(chunks)
+        if not raw:
+            return []
+        return self.parse_frames(raw)
+
+    def query_state(self, include_supported_inputs: bool = True) -> dict:
+        cmds = []
+        if include_supported_inputs:
+            cmds.append(self.CMD_STATUS)
+        cmds.extend([self.CMD_POWER, self.CMD_INPUT_MODE, self.CMD_VOLUME])
+        frames = b"".join(self.build_frame(cmd, 0x02) for cmd in cmds)
+        parsed = self.transact(frames)
+
+        result = {
+            "power_on": None,
+            "input_b1": None,
+            "input_b2": None,
+            "sound_mode": None,
+            "volume_raw": None,
+            "volume_max": 70,
+            "supported_inputs": [],
+        }
+
+        for frame in parsed:
+            data = frame["data"]
+            if frame["cmd"] == self.CMD_POWER and len(data) >= 1:
+                result["power_on"] = data[0] == 0x01
+            elif frame["cmd"] == self.CMD_INPUT_MODE and frame["type"] == 0x01 and len(data) >= 3:
+                result["input_b1"] = data[0]
+                result["input_b2"] = data[1]
+                result["sound_mode"] = data[2]
+            elif frame["cmd"] == self.CMD_VOLUME and len(data) >= 1:
+                result["volume_raw"] = data[0]
+                if len(data) >= 2 and data[1] > 0:
+                    result["volume_max"] = data[1]
+            elif frame["cmd"] == self.CMD_STATUS and frame["type"] == 0x01 and len(data) >= 3 and len(data) % 3 == 0:
+                result["supported_inputs"] = [tuple(data[i : i + 3]) for i in range(0, len(data), 3)]
+
+        return result
+
+    def set_power(self, on: bool) -> list[dict]:
+        return self.transact(self.build_frame(self.CMD_POWER, 0x01, bytes([0x01 if on else 0x00])))
+
+    def set_volume_raw(self, level: int) -> list[dict]:
+        level = max(0, min(70, int(level)))
+        return self.transact(self.build_frame(self.CMD_VOLUME, 0x01, bytes([level])))
+
+    def set_input(self, byte1: int, byte2: int, sound_mode: int) -> list[dict]:
+        payload = bytes([byte1 & 0xFF, byte2 & 0xFF, max(1, min(3, int(sound_mode)))])
+        return self.transact(self.build_frame(self.CMD_INPUT_MODE, 0x01, payload))
+
 
 def setup_logging(logfile: str, loglevel: int) -> None:
-    level_map = {1: logging.CRITICAL, 2: logging.ERROR, 3: logging.WARNING,
-                 4: logging.INFO, 5: logging.DEBUG, 6: logging.DEBUG}
+    level_map = {1: logging.CRITICAL, 2: logging.ERROR, 3: logging.WARNING, 4: logging.INFO, 5: logging.DEBUG, 6: logging.DEBUG}
     level = level_map.get(loglevel, logging.INFO)
-
-    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s",
-                             datefmt="%Y-%m-%d %H:%M:%S")
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
     os.makedirs(os.path.dirname(logfile), exist_ok=True)
     fh = RotatingFileHandler(logfile, maxBytes=5 * 1024 * 1024, backupCount=3)
     fh.setFormatter(fmt)
-
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(fmt)
 
     log.setLevel(level)
+    log.handlers.clear()
     log.addHandler(fh)
     log.addHandler(sh)
 
 
-# ---------------------------------------------------------------------------
-# Soundbar HTTP API
-# ---------------------------------------------------------------------------
-
-def _api_url() -> str:
-    ip = _config.get("SOUNDBAR", "IP")
-    return f"http://{ip}:1904/canton"
-
-
-def api_get(action: str, timeout: int = 4) -> dict:
-    """GET /canton?action=ACTION. Returns parsed JSON dict or {} on error."""
-    with _api_lock:
-        try:
-            r = requests.get(_api_url(), params={"action": action}, timeout=timeout)
-            r.raise_for_status()
-            data = r.json()
-            log.debug(f"GET {action}: {data}")
-            return data
-        except requests.exceptions.JSONDecodeError:
-            body = (r.text or "").strip()[:200] if 'r' in locals() else ""
-            log.warning(f"GET {action} returned non-JSON (HTTP {getattr(r, 'status_code', '?')}): {body!r}")
-            _trace_publish("error", _trace_payload("api_get_non_json", action=action, http=getattr(r, "status_code", "?"), body=body), retain=True)
-            return {}
-        except Exception as e:
-            log.warning(f"GET {action} failed: {type(e).__name__}: {e}")
-            _trace_publish("error", _trace_payload("api_get_failed", action=action, error=f"{type(e).__name__}: {e}"), retain=True)
-            return {}
-
-
-def api_post(action: str, body: dict, timeout: int = 4) -> dict:
-    """POST /canton?action=ACTION with JSON body. Returns parsed JSON or {} on error."""
-    with _api_lock:
-        try:
-            r = requests.post(_api_url(), params={"action": action},
-                              json=body, timeout=timeout)
-            r.raise_for_status()
-            data = r.json()
-            log.debug(f"POST {action} {body}: {data}")
-            return data
-        except requests.exceptions.JSONDecodeError:
-            body_txt = (r.text or "").strip()[:200] if 'r' in locals() else ""
-            log.warning(f"POST {action} {body} returned non-JSON (HTTP {getattr(r, 'status_code', '?')}): {body_txt!r}")
-            _trace_publish("error", _trace_payload("api_post_non_json", action=action, request=body, http=getattr(r, "status_code", "?"), body=body_txt), retain=True)
-            return {}
-        except Exception as e:
-            log.warning(f"POST {action} {body} failed: {type(e).__name__}: {e}")
-            _trace_publish("error", _trace_payload("api_post_failed", action=action, request=body, error=f"{type(e).__name__}: {e}"), retain=True)
-            return {}
-
-
-def api_ok(result: dict) -> bool:
-    """LibreKNX success response is usually status=101 (ERROR-OK)."""
-    return isinstance(result, dict) and result.get("status") == 101
-
-
-def _normalize_mac(mac: str) -> str:
-    return (mac or "").strip().replace("-", ":").upper()
-
-
-def _is_valid_mac(mac: str) -> bool:
-    mac = _normalize_mac(mac)
-    parts = mac.split(":")
-    if len(parts) != 6:
-        return False
-    try:
-        return all(len(p) == 2 and 0 <= int(p, 16) <= 255 for p in parts)
-    except ValueError:
-        return False
-
-
-def resolve_wol_mac() -> str:
-    """Resolve best MAC for WoL, preferring soundbar-reported MAC when available."""
-    configured = _normalize_mac(_config.get("SOUNDBAR", "MAC", fallback=""))
-    info = api_get("info", timeout=2)
-    api_mac = _normalize_mac(str(info.get("MACAddress", ""))) if info else ""
-
-    if _is_valid_mac(api_mac):
-        if configured and configured != api_mac:
-            log.warning(f"Configured MAC {configured} differs from device MAC {api_mac}; using device MAC")
-        return api_mac
-
-    if _is_valid_mac(configured):
-        return configured
-
-    return ""
-
-
-def set_volume_override(volume: int) -> None:
-    global _volume_override, _volume_override_ts
-    _volume_override = max(0, min(100, int(volume)))
-    _volume_override_ts = time.time()
-
-
-def get_volume_override(max_age_s: int = 1800) -> int | None:
-    if _volume_override is None:
-        return None
-    if time.time() - _volume_override_ts > max_age_s:
-        return None
-    return _volume_override
-
-
-def refresh_source_map(force: bool = False) -> None:
-    """Fetch and cache source number->name mapping from action=sources."""
-    global _source_map, _source_map_ts
-
-    now = time.time()
-    max_age_s = _config.getint("MONITOR", "SOURCE_MAP_REFRESH_SECONDS", fallback=300)
-    if not force and _source_map and (now - _source_map_ts) < max_age_s:
-        return
-
-    sources = api_get("sources", timeout=3)
-    if not isinstance(sources, dict) or not sources:
-        return
-
-    inv: dict[str, str] = {}
-    for name, number in sources.items():
-        key = str(number)
-        val = str(name)
-        if key and val:
-            inv[key] = val
-
-    if inv:
-        _source_map = inv
-        _source_map_ts = now
-
-
-def input_name_for(value: str) -> str:
-    return _source_map.get(str(value), f"SRC_{value}")
-
-
-def get_audio_status(timeout: int | None = None) -> dict:
-    """Read current volume/mute, preferring the faster volumeStatus action."""
-    req_timeout = timeout if timeout is not None else _config.getint("MONITOR", "STATUS_TIMEOUT", fallback=2)
-
-    data = api_get("volumeStatus", timeout=req_timeout)
-    if isinstance(data, dict) and data:
-        vol = data.get("Volume", data.get("volume"))
-        mute = data.get("MuteStatus", data.get("muteStatus"))
-        try:
-            return {
-                "volume": max(0, min(100, int(vol))),
-                "mute": "on" if bool(mute) else "off",
-                "source": "volumeStatus",
-            }
-        except (TypeError, ValueError):
-            pass
-
-    # Fallback for older/unstable builds where volumeStatus is unavailable.
-    data = api_get("status", timeout=req_timeout)
-    if isinstance(data, dict) and data:
-        vol = data.get("Volume", data.get("volume"))
-        mute = data.get("MuteStatus", data.get("muteStatus"))
-        try:
-            return {
-                "volume": max(0, min(100, int(vol))),
-                "mute": "on" if bool(mute) else "off",
-                "source": "status",
-            }
-        except (TypeError, ValueError):
-            pass
-
-    return {}
-
-
-def _normalize_power_status(value: str) -> str:
-    token = str(value or "").strip().upper()
-    if token == "ON":
-        return "on"
-    if token in ("STANDBY", "STB_NSB", "OFF"):
-        return "standby"
-    return ""
-
-
-def start_power_transition(target: str) -> None:
-    global _power_transition_until, _power_transition_target, _power_transition_noted
-    grace = _config.getint("MONITOR", "POWER_TRANSITION_GRACE_SECONDS", fallback=25)
-    _power_transition_until = time.time() + max(3, grace)
-    _power_transition_target = target if target in ("on", "standby") else ""
-    _power_transition_noted = False
-    if _power_transition_target:
-        trace_event("power_transition_started", target=_power_transition_target, grace_seconds=max(3, grace))
-
-
-def in_power_transition() -> bool:
-    return time.time() < _power_transition_until
-
-
-def api_down_expected_after_standby() -> bool:
-    return _power_transition_target == "standby" and in_power_transition()
-
-
-def clear_power_transition() -> None:
-    global _power_transition_until, _power_transition_target, _power_transition_noted
-    _power_transition_until = 0.0
-    _power_transition_target = ""
-    _power_transition_noted = False
-
-
-def _run_cmd(cmd: list[str], timeout: int = 8) -> tuple[int, str, str]:
-    try:
-        cp = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        return cp.returncode, (cp.stdout or "").strip(), (cp.stderr or "").strip()
-    except Exception as e:
-        return 1, "", f"{type(e).__name__}: {e}"
-
-
-def _health_topics() -> dict:
-    base = _config.get("MQTT", "HEALTH_BASE_TOPIC", fallback="loxberry/plugin/cantonbar/health")
-    return {
-        "api": _config.get("MQTT", "API_HEALTH_TOPIC", fallback=f"{base}/api"),
-        "adb": _config.get("MQTT", "ADB_HEALTH_TOPIC", fallback=f"{base}/adb"),
-        "libreknx": _config.get("MQTT", "LIBREKNX_HEALTH_TOPIC", fallback=f"{base}/libreknx"),
-        "token": _config.get("MQTT", "TOKEN_HEALTH_TOPIC", fallback=f"{base}/token"),
-    }
-
-
-def _trace_topics() -> dict:
-    base = _config.get("MQTT", "TRACE_BASE_TOPIC", fallback="loxberry/plugin/cantonbar/trace")
-    return {
-        "event": _config.get("MQTT", "TRACE_EVENT_TOPIC", fallback=f"{base}/event"),
-        "command": _config.get("MQTT", "TRACE_LAST_COMMAND_TOPIC", fallback=f"{base}/last_command"),
-        "result": _config.get("MQTT", "TRACE_LAST_RESULT_TOPIC", fallback=f"{base}/last_result"),
-        "error": _config.get("MQTT", "TRACE_LAST_ERROR_TOPIC", fallback=f"{base}/last_error"),
-    }
-
-
-def _trace_payload(event: str, **fields) -> dict:
-    global _trace_seq
-    _trace_seq += 1
-    payload = {"ts": int(time.time()), "seq": _trace_seq, "event": event}
-    payload.update(fields)
-    return payload
-
-
-def _trace_publish(topic_key: str, payload: dict, retain: bool = True) -> None:
-    try:
-        topic = _trace_topics()[topic_key]
-        _publish(topic, json.dumps(payload, separators=(",", ":")), retain=retain)
-    except Exception as e:
-        log.debug(f"Trace publish failed: {e}")
-
-
-def trace_event(event: str, level: str = "info", retain_event: bool = False, **fields) -> None:
-    payload = _trace_payload(event, **fields)
-    text = f"TRACE {payload['seq']} {event}: {fields}"
-    if level == "warning":
-        log.warning(text)
-    elif level == "error":
-        log.error(text)
-    elif level == "debug":
-        log.debug(text)
+def parse_hex_byte(token: str) -> int:
+    text = (token or "").strip()
+    if not text:
+        raise ValueError("empty byte token")
+    if text.lower().startswith("0x"):
+        value = int(text, 16)
     else:
-        log.info(text)
-    _trace_publish("event", payload, retain=retain_event)
+        value = int(text, 16)
+    if not 0 <= value <= 0xFF:
+        raise ValueError(f"byte out of range: {token}")
+    return value
 
 
-def publish_health(force: bool = False) -> None:
-    topics = _health_topics()
-    for key in ("api", "adb", "libreknx", "token"):
-        val = _health.get(key, "unknown")
-        if force or _last_health_pub.get(key) != val:
-            _publish(topics[key], val)
-            _last_health_pub[key] = val
+def load_input_mappings() -> dict[str, InputMapping]:
+    raw_items = dict(DEFAULT_INPUT_MAPPINGS)
+    if _config and _config.has_section("FFAA_INPUTS"):
+        for source_id, value in _config.items("FFAA_INPUTS"):
+            raw_items[str(source_id).strip()] = value
 
-
-def _adb_binary() -> str:
-    return shutil.which("adb") or ""
-
-
-def _adb_connect(ip: str) -> bool:
-    adb = _adb_binary()
-    if not adb:
-        _health["adb"] = "unavailable"
-        log.warning("ADB binary not found on system; cannot auto-recover LibreKNX")
-        return False
-
-    rc, out, err = _run_cmd([adb, "connect", f"{ip}:5555"], timeout=10)
-    txt = f"{out} {err}".lower()
-    if rc == 0 and ("connected" in txt or "already connected" in txt):
-        _health["adb"] = "connected"
-        return True
-
-    _health["adb"] = "failed"
-    log.warning(f"ADB connect failed: rc={rc}, out={out!r}, err={err!r}")
-    return False
-
-
-def _is_libreknx_running(ip: str) -> bool:
-    adb = _adb_binary()
-    if not adb:
-        return False
-    cmd = [adb, "-s", f"{ip}:5555", "shell", "ps | grep -F LibreKNX | grep -v grep"]
-    rc, out, err = _run_cmd(cmd, timeout=8)
-    if rc == 0 and out:
-        _health["libreknx"] = "running"
-        return True
-    if err and "device offline" in err.lower():
-        _health["adb"] = "failed"
-    _health["libreknx"] = "down"
-    return False
-
-
-def _start_libreknx(ip: str) -> bool:
-    adb = _adb_binary()
-    if not adb:
-        return False
-
-    # Method 1: detached remote launch that should survive shell exit.
-    cmd = [
-        adb,
-        "-s",
-        f"{ip}:5555",
-        "shell",
-        "sh -c 'nohup /system/bin/LibreKNX >/dev/null 2>&1 </dev/null &'",
-    ]
-    rc, out, err = _run_cmd(cmd, timeout=8)
-    if rc == 0:
-        time.sleep(2)
-        if _wait_for_api(ip, retries=3, delay_s=1):
-            return True
-
-    log.warning(f"Detached LibreKNX start via adb shell did not recover API yet: rc={rc}, out={out!r}, err={err!r}")
-
-    # Method 2: keep a dedicated adb client alive with LibreKNX in foreground.
-    # This is heavier, but more reliable on devices where the remote shell kills background jobs.
-    try:
-        subprocess.Popen(
-            [adb, "-s", f"{ip}:5555", "shell", "/system/bin/LibreKNX"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except Exception as e:
-        log.warning(f"Failed to spawn persistent adb client for LibreKNX: {type(e).__name__}: {e}")
-        _health["libreknx"] = "start_failed"
-        return False
-
-    time.sleep(3)
-    ok = _wait_for_api(ip, retries=3, delay_s=1)
-    if not ok:
-        _health["libreknx"] = "start_failed"
-    return ok
-
-
-def _stop_libreknx(ip: str) -> bool:
-    adb = _adb_binary()
-    if not adb:
-        return False
-
-    # Best-effort stop; some builds may not have pkill/killall.
-    cmd = [
-        adb,
-        "-s",
-        f"{ip}:5555",
-        "shell",
-        "sh -c 'pkill -f LibreKNX >/dev/null 2>&1 || killall LibreKNX >/dev/null 2>&1 || true'",
-    ]
-    _run_cmd(cmd, timeout=8)
-    time.sleep(1)
-    return not _is_libreknx_running(ip)
-
-
-def _wait_for_api(ip: str, retries: int = 8, delay_s: int = 2) -> bool:
-    url = f"http://{ip}:1904/canton"
-    for _ in range(retries):
+    mappings: dict[str, InputMapping] = {}
+    for source_id, value in raw_items.items():
+        parts = [part.strip() for part in str(value).split(",") if part.strip()]
+        if len(parts) < 3:
+            log.warning(f"Skipping invalid FFAA input mapping for source {source_id!r}: {value!r}")
+            continue
         try:
-            r = requests.get(url, params={"action": "powerstatus"}, timeout=3)
-            r.raise_for_status()
-            data = r.json()
-            if isinstance(data, dict) and "PowerStatus" in data:
-                return True
-        except Exception:
-            pass
-        time.sleep(delay_s)
-    return False
+            byte1 = parse_hex_byte(parts[0])
+            byte2 = parse_hex_byte(parts[1])
+        except ValueError as e:
+            log.warning(f"Skipping invalid FFAA byte mapping for source {source_id!r}: {e}")
+            continue
+
+        name = ",".join(parts[2:]).strip() or f"SRC_{source_id}"
+        mappings[str(source_id)] = InputMapping(str(source_id), byte1, byte2, name)
+
+    return dict(sorted(mappings.items(), key=lambda item: int(item[0]) if item[0].isdigit() else item[0]))
 
 
-def _send_luci_local(ip: str, mid: int, payload: str) -> bool:
-    adb = _adb_binary()
-    if not adb:
-        return False
-    cmd = [adb, "-s", f"{ip}:5555", "shell", "LUCI_local", str(mid), payload]
-    rc, out, err = _run_cmd(cmd, timeout=8)
-    ok = rc == 0 and "done local write" in (out or "").lower()
-    if not ok:
-        log.warning(f"LUCI_local send failed (mid={mid}, payload={payload!r}): rc={rc}, out={out!r}, err={err!r}")
-    return ok
+def mapping_name_json(mappings: dict[str, InputMapping]) -> str:
+    return json.dumps({source_id: mapping.name for source_id, mapping in mappings.items()}, sort_keys=True, separators=(",", ":"))
 
 
-def refresh_api_token() -> None:
-    token_action = _config.get("RECOVERY", "TOKEN_ACTION", fallback="").strip()
-    if not token_action:
-        _health["token"] = "disabled"
-        return
-
-    token_data = api_get(token_action)
-    if not token_data:
-        _health["token"] = "error"
-        return
-
-    token_value = ""
-    for key in ("token", "Token", "apiToken", "ApiToken", "access_token", "accessToken"):
-        value = token_data.get(key)
-        if isinstance(value, str) and value.strip():
-            token_value = value.strip()
-            break
-
-    if token_value:
-        _health["token_value"] = token_value
-        _health["token"] = "ok"
-        log.warning("API token refreshed successfully")
-    else:
-        _health["token"] = "missing"
+def find_mapping_by_bytes(byte1: int, byte2: int, mappings: dict[str, InputMapping]) -> InputMapping | None:
+    for mapping in mappings.values():
+        if mapping.byte1 == byte1 and mapping.byte2 == byte2:
+            return mapping
+    return None
 
 
-def maybe_recover_libreknx() -> None:
-    global _last_recovery_ts
-
-    cooldown = _config.getint("RECOVERY", "COOLDOWN_SECONDS", fallback=90)
-    now = time.time()
-    if now - _last_recovery_ts < cooldown:
-        return
-    _last_recovery_ts = now
-
-    ip = _config.get("SOUNDBAR", "IP", fallback="").strip()
-    if not ip:
-        return
-
-    _health["api"] = "recovering"
-    _health["libreknx"] = "restarting"
-    publish_health()
-    trace_event("recovery_started", level="warning", api=_health["api"], libreknx=_health["libreknx"])
-
-    log.warning("LibreKNX API appears down; attempting ADB-based recovery")
-    if not _adb_connect(ip):
-        _health["api"] = "down"
-        _health["libreknx"] = "unknown"
-        publish_health()
-        _trace_publish("error", _trace_payload("recovery_failed", stage="adb_connect"), retain=True)
-        return
-
-    running_before = _is_libreknx_running(ip)
-    if running_before:
-        log.warning("ADB connected and LibreKNX process is running but API is still down; forcing LibreKNX restart")
-        _stop_libreknx(ip)
-
-    if _start_libreknx(ip):
-        log.warning("LibreKNX start/restart command sent via ADB")
-        trace_event("recovery_restart_sent", level="warning")
-    else:
-        _health["api"] = "down"
-        _health["libreknx"] = "start_failed"
-        log.warning("LibreKNX start/restart via ADB failed")
-        _trace_publish("error", _trace_payload("recovery_failed", stage="start_libreknx"), retain=True)
-
-    if _wait_for_api(ip):
-        _health["api"] = "up"
-        _health["libreknx"] = "running"
-        log.warning("LibreKNX API recovered after restart")
-        trace_event("recovery_succeeded", level="warning", api="up")
-    else:
-        _health["api"] = "down"
-        _health["libreknx"] = "running" if _is_libreknx_running(ip) else "down"
-        log.warning("LibreKNX process recovery attempted, but API is still down")
-        _trace_publish("error", _trace_payload("recovery_failed", stage="api_not_recovered", libreknx=_health["libreknx"]), retain=True)
-
-    publish_health()
+def raw_volume_to_percent(level: int, maximum: int) -> int:
+    maximum = max(1, int(maximum or 70))
+    return max(0, min(100, round((int(level) * 100) / maximum)))
 
 
-# ---------------------------------------------------------------------------
-# State polling
-# ---------------------------------------------------------------------------
-
-def get_soundbar_state() -> dict:
-    """
-    Poll soundbar for current state. Returns dict with:
-      power:  "on" | "standby"
-      volume: int 0-100
-      mute:   "on" | "off"
-      input:  str (input source number)
-    """
-    fallback_power = _last_state if _last_state in ("on", "standby") else "standby"
-    fallback_volume = get_volume_override() or (int(_last_volume) if _last_volume.isdigit() else 0)
-    fallback_mute = _last_mute if _last_mute in ("on", "off") else "off"
-    fallback_input = _last_input if _last_input else "0"
-    state = {
-        "power": fallback_power,
-        "volume": fallback_volume,
-        "mute": fallback_mute,
-        "input": fallback_input,
-        "input_name": input_name_for(fallback_input),
-        "_api_ok": False,
-        "_power_confirmed": False,
-    }
-
-    power_data = api_get("powerstatus")
-    if isinstance(power_data, dict) and power_data:
-        state["_api_ok"] = True
-
-    power = _normalize_power_status(power_data.get("PowerStatus", "")) if isinstance(power_data, dict) else ""
-    if power:
-        state["power"] = power
-        state["_power_confirmed"] = True
-
-    if state["_power_confirmed"] and state["power"] != "on":
-        return state  # standby — no point polling the rest
-
-    refresh_source_map()
-
-    audio = get_audio_status()
-    if audio:
-        state["volume"] = int(audio["volume"])
-        state["mute"] = audio["mute"]
-
-    override_volume = get_volume_override()
-    if override_volume is not None and state["power"] == "on":
-        if state["volume"] != override_volume:
-            log.debug(f"Using local commanded volume override {override_volume} instead of stale API value {state['volume']}")
-        state["volume"] = override_volume
-
-    inp = api_get("input")
-    if inp:
-        state["input"] = str(inp.get("InputSource", "0"))
-        state["input_name"] = input_name_for(state["input"])
-
-    return state
+def percent_to_raw_volume(percent: int, maximum: int) -> int:
+    maximum = max(1, int(maximum or 70))
+    pct = max(0, min(100, int(percent)))
+    return max(0, min(maximum, round((pct * maximum) / 100)))
 
 
-# ---------------------------------------------------------------------------
-# MQTT publishing
-# ---------------------------------------------------------------------------
+def ffaa_client() -> FfaaClient:
+    ip = (_config.get("SOUNDBAR", "IP", fallback="") if _config else "").strip()
+    port = _config.getint("SOUNDBAR", "PORT", fallback=50006) if _config else 50006
+    timeout = max(1, _config.getint("MONITOR", "STATUS_TIMEOUT", fallback=2) if _config else 2)
+    return FfaaClient(ip, port, timeout=float(timeout))
+
 
 def _publish(topic: str, value: str, retain: bool = True) -> None:
+    if not _mqtt_client:
+        return
     try:
         _mqtt_client.publish(topic, value, qos=1, retain=retain)
     except Exception as e:
         log.error(f"MQTT publish failed: {e}")
 
 
+def get_soundbar_state() -> dict:
+    global _last_volume_raw, _last_volume_max, _last_input_bytes, _last_sound_mode
+
+    mappings = load_input_mappings()
+    fallback_power = _last_state if _last_state in ("on", "standby") else "standby"
+    fallback_volume = int(_last_volume) if _last_volume.isdigit() else raw_volume_to_percent(_last_volume_raw, _last_volume_max)
+    fallback_input = _last_input if _last_input else "unknown"
+    fallback_input_name = _last_input_name if _last_input_name else "Unknown"
+
+    try:
+        state = ffaa_client().query_state(include_supported_inputs=True)
+    except Exception as e:
+        log.warning(f"FFAA state query failed: {type(e).__name__}: {e}")
+        return {
+            "power": fallback_power,
+            "volume": fallback_volume,
+            "mute": "unsupported",
+            "input": fallback_input,
+            "input_name": fallback_input_name,
+            "sound_mode": SOUND_MODE_NAMES.get(_last_sound_mode, f"Mode {_last_sound_mode}"),
+            "_ok": False,
+            "_input_map_json": mapping_name_json(mappings),
+        }
+
+    power = "on" if state.get("power_on") else "standby"
+    volume_raw = int(state.get("volume_raw") if state.get("volume_raw") is not None else _last_volume_raw)
+    volume_max = int(state.get("volume_max") if state.get("volume_max") is not None else _last_volume_max or 70)
+    input_b1 = int(state.get("input_b1") if state.get("input_b1") is not None else _last_input_bytes[0])
+    input_b2 = int(state.get("input_b2") if state.get("input_b2") is not None else _last_input_bytes[1])
+    sound_mode = int(state.get("sound_mode") if state.get("sound_mode") is not None else _last_sound_mode or 2)
+
+    _last_volume_raw = volume_raw
+    _last_volume_max = volume_max
+    _last_input_bytes = (input_b1, input_b2)
+    _last_sound_mode = sound_mode
+
+    mapping = find_mapping_by_bytes(input_b1, input_b2, mappings)
+    if mapping:
+        input_value = mapping.source_id
+        input_name = mapping.name
+    else:
+        input_value = f"raw_{input_b1:02X}{input_b2:02X}"
+        input_name = f"RAW {input_b1:02X}:{input_b2:02X}"
+
+    for triple in state.get("supported_inputs", []):
+        if len(triple) < 2:
+            continue
+        key = f"{triple[0]:02X}:{triple[1]:02X}"
+        if not find_mapping_by_bytes(triple[0], triple[1], mappings) and key not in _logged_unknown_inputs:
+            log.info(f"Discovered unmapped FFAA input tuple {key} (mode={triple[2] if len(triple) > 2 else '?'})")
+            _logged_unknown_inputs.add(key)
+
+    return {
+        "power": power,
+        "volume": raw_volume_to_percent(volume_raw, volume_max),
+        "mute": "unsupported",
+        "input": input_value,
+        "input_name": input_name,
+        "sound_mode": SOUND_MODE_NAMES.get(sound_mode, f"Mode {sound_mode}"),
+        "_ok": True,
+        "_input_map_json": mapping_name_json(mappings),
+    }
+
+
 def publish_state(state: dict) -> None:
     global _last_state, _last_volume, _last_mute, _last_input, _last_input_name, _last_input_map_json
 
-    power  = state["power"]
-    power_confirmed = bool(state.get("_power_confirmed"))
-    volume = str(state["volume"])
-    mute   = state["mute"]
-    inp    = state["input"]
-    inp_name = state.get("input_name", input_name_for(inp))
-
-    state_topic  = _config.get("MQTT", "STATE_TOPIC",  fallback="loxberry/plugin/cantonbar/state")
+    state_topic = _config.get("MQTT", "STATE_TOPIC", fallback="loxberry/plugin/cantonbar/state")
     volume_topic = _config.get("MQTT", "VOLUME_TOPIC", fallback="loxberry/plugin/cantonbar/volume")
-    mute_topic   = _config.get("MQTT", "MUTE_TOPIC",   fallback="loxberry/plugin/cantonbar/mute")
-    input_topic  = _config.get("MQTT", "INPUT_TOPIC",  fallback="loxberry/plugin/cantonbar/input")
+    mute_topic = _config.get("MQTT", "MUTE_TOPIC", fallback="loxberry/plugin/cantonbar/mute")
+    input_topic = _config.get("MQTT", "INPUT_TOPIC", fallback="loxberry/plugin/cantonbar/input")
     input_name_topic = _config.get("MQTT", "INPUT_NAME_TOPIC", fallback="loxberry/plugin/cantonbar/input_name")
     input_map_topic = _config.get("MQTT", "INPUT_MAP_TOPIC", fallback="loxberry/plugin/cantonbar/input_map")
 
-    if power_confirmed:
-        if power != _last_state:
-            _publish(state_topic, power)
-            log.info(f"State → {power!r}")
-            _last_state = power
-    elif _last_state:
-        # Do not publish unconfirmed power guesses during API outages.
-        power = _last_state
+    power = state["power"]
+    volume = str(state["volume"])
+    mute = state.get("mute", "unsupported")
+    inp = state["input"]
+    inp_name = state.get("input_name", "Unknown")
+    input_map_json = state.get("_input_map_json", "{}")
+
+    if power != _last_state:
+        _publish(state_topic, power)
+        log.info(f"State → {power!r}")
+        _last_state = power
 
     if volume != _last_volume:
         _publish(volume_topic, volume)
@@ -704,221 +380,131 @@ def publish_state(state: dict) -> None:
         log.info(f"Input name → {inp_name!r}")
         _last_input_name = inp_name
 
-    if _source_map:
-        mapping_json = json.dumps(_source_map, sort_keys=True, separators=(",", ":"))
-        if mapping_json != _last_input_map_json:
-            _publish(input_map_topic, mapping_json)
-            _last_input_map_json = mapping_json
+    if input_map_json != _last_input_map_json:
+        _publish(input_map_topic, input_map_json)
+        _last_input_map_json = input_map_json
 
 
 def republish_all() -> None:
-    """Clear cached values so everything is re-published on next poll (e.g. after MQTT reconnect)."""
     global _last_state, _last_volume, _last_mute, _last_input, _last_input_name, _last_input_map_json
     _last_state = _last_volume = _last_mute = _last_input = ""
     _last_input_name = ""
     _last_input_map_json = ""
 
 
-# ---------------------------------------------------------------------------
-# MQTT command handler
-# ---------------------------------------------------------------------------
+def current_sound_mode() -> int:
+    if _last_sound_mode in (1, 2, 3):
+        return _last_sound_mode
+    try:
+        state = ffaa_client().query_state(include_supported_inputs=False)
+        mode = int(state.get("sound_mode") or 2)
+        return mode if mode in (1, 2, 3) else 2
+    except Exception:
+        return 2
+
+
+def current_volume_target() -> tuple[int, int]:
+    if _last_volume_max > 0:
+        return _last_volume_raw, _last_volume_max
+    try:
+        state = ffaa_client().query_state(include_supported_inputs=False)
+        raw = int(state.get("volume_raw") or 0)
+        maximum = int(state.get("volume_max") or 70)
+        return raw, maximum
+    except Exception:
+        return 0, 70
+
 
 def on_mqtt_connect(client, userdata, flags, rc) -> None:
     if rc == 0:
         cmd_topic = _config.get("MQTT", "CMD_TOPIC", fallback="loxberry/plugin/cantonbar/cmd")
         client.subscribe(cmd_topic, qos=1)
         log.info(f"MQTT connected, subscribed to {cmd_topic}")
-        trace_event("mqtt_connected", cmd_topic=cmd_topic)
         republish_all()
     else:
         log.error(f"MQTT connection failed, rc={rc}")
-        _trace_publish("error", _trace_payload("mqtt_connect_failed", rc=rc), retain=True)
 
 
 def on_mqtt_disconnect(client, userdata, rc) -> None:
     if rc != 0:
         log.warning(f"MQTT disconnected unexpectedly (rc={rc}), will auto-reconnect")
-        _trace_publish("error", _trace_payload("mqtt_disconnected", rc=rc), retain=True)
 
 
 def on_mqtt_message(client, userdata, msg) -> None:
     payload = msg.payload.decode("utf-8", errors="ignore").strip()
     log.info(f"MQTT command received: {payload!r}")
-    _trace_publish("command", _trace_payload("command_received", topic=msg.topic, command=payload), retain=True)
     handle_command(payload)
 
 
 def handle_command(cmd: str) -> None:
-    mac = _config.get("SOUNDBAR", "MAC", fallback="")
-    ip = _config.get("SOUNDBAR", "IP", fallback="").strip()
-
     try:
-        started = time.time()
-
-        def cmd_done(success: bool, detail: dict) -> None:
-            elapsed_ms = int((time.time() - started) * 1000)
-            payload = _trace_payload("command_result", command=cmd, ok=success, elapsed_ms=elapsed_ms, **detail)
-            _trace_publish("result", payload, retain=True)
-            if not success:
-                _trace_publish("error", payload, retain=True)
+        client = ffaa_client()
+        mappings = load_input_mappings()
 
         if cmd == "power_on":
-            # Send WoL first when possible, then try LUCI standby-off as a second path.
-            # This helps both deep-standby wakeups and regular standby transitions.
-            wol_mac = resolve_wol_mac()
-            wol_sent = False
-            if wol_mac:
-                wakeonlan.send_magic_packet(wol_mac)
-                log.info(f"Wake-on-LAN sent to {wol_mac}")
-                wol_sent = True
+            response = client.set_power(True)
+            log.info(f"Power on (FFAA): {response}")
+            return
 
-            luci_ok = bool(ip) and _adb_connect(ip) and _send_luci_local(ip, 70, "STANDBYOFF")
-            if luci_ok:
-                log.info("Power on requested via LUCI STANDBYOFF")
+        if cmd == "power_off":
+            response = client.set_power(False)
+            log.info(f"Power off (FFAA): {response}")
+            return
 
-            if wol_sent or luci_ok:
-                start_power_transition("on")
-                cmd_done(True, {"action": "power_on", "wol": wol_sent, "luci": luci_ok, "mac": wol_mac})
-            else:
-                log.warning("power_on failed: no valid MAC for WoL and LUCI standby-off unavailable")
-                cmd_done(False, {"action": "power_on", "error": "no_wol_mac_no_luci"})
-
-        elif cmd == "power_off":
-            if ip and _adb_connect(ip) and _send_luci_local(ip, 70, "STANDBYON"):
-                log.info("Standby requested via LUCI STANDBYON")
-                start_power_transition("standby")
-                cmd_done(True, {"action": "adb_standbyon"})
-            else:
-                if not _config.getboolean("EXPERIMENTAL", "ENABLE_POWER_OFF", fallback=False):
-                    log.warning("power_off failed: LUCI standby unavailable and HTTP fallback is disabled by config")
-                    cmd_done(False, {"action": "standby", "error": "luci_failed_http_fallback_disabled"})
-                    return
-                # Last resort: legacy HTTP standby (known unreliable on this firmware).
-                result = api_post("standby", {"standby": True})
-                log.info(f"Standby (HTTP fallback): {result}")
-                if api_ok(result):
-                    start_power_transition("standby")
-                cmd_done(api_ok(result), {"action": "standby_http_fallback", "response": result})
-
-        elif cmd.startswith("volume_set_"):
+        if cmd.startswith("volume_set_"):
             try:
-                vol = int(cmd.split("_", 2)[2])
-                vol = max(0, min(100, vol))
-                result = api_post("volume", {"volume": vol})
-                if not api_ok(result):
-                    # Fallback noted in NEXT_SESSION (possible uppercase field name)
-                    result = api_post("volume", {"Volume": vol})
-                if api_ok(result):
-                    set_volume_override(vol)
-                log.info(f"Volume set {vol}: {result}")
-                cmd_done(api_ok(result), {"action": "volume_set", "target": vol, "response": result})
+                pct = max(0, min(100, int(cmd.split("_", 2)[2])))
             except (ValueError, IndexError):
                 log.warning(f"Invalid volume command: {cmd!r}")
-                cmd_done(False, {"action": "volume_set", "error": "invalid_command"})
-
-        elif cmd == "volume_up":
-            audio = get_audio_status()
-            current = get_volume_override()
-            if current is None:
-                if audio:
-                    current = int(audio["volume"])
-                else:
-                    current = int(_last_volume) if _last_volume.isdigit() else 50
-            step = _config.getint("SOUNDBAR", "VOLUME_STEP", fallback=5)
-            new_vol = min(100, current + step)
-            result = api_post("volume", {"volume": new_vol})
-            if not api_ok(result):
-                result = api_post("volume", {"Volume": new_vol})
-            if api_ok(result):
-                set_volume_override(new_vol)
-            log.info(f"Volume up: {current} → {new_vol}: {result}")
-            cmd_done(api_ok(result), {"action": "volume_up", "from": current, "to": new_vol, "response": result})
-
-        elif cmd == "volume_down":
-            audio = get_audio_status()
-            current = get_volume_override()
-            if current is None:
-                if audio:
-                    current = int(audio["volume"])
-                else:
-                    current = int(_last_volume) if _last_volume.isdigit() else 50
-            step = _config.getint("SOUNDBAR", "VOLUME_STEP", fallback=5)
-            new_vol = max(0, current - step)
-            result = api_post("volume", {"volume": new_vol})
-            if not api_ok(result):
-                result = api_post("volume", {"Volume": new_vol})
-            if api_ok(result):
-                set_volume_override(new_vol)
-            log.info(f"Volume down: {current} → {new_vol}: {result}")
-            cmd_done(api_ok(result), {"action": "volume_down", "from": current, "to": new_vol, "response": result})
-
-        elif cmd == "mute_on":
-            power = api_get("powerstatus").get("PowerStatus", "").upper()
-            if power == "STANDBY":
-                log.warning("mute_on requested while soundbar is STANDBY; command may be ignored by device")
-            result = api_post("mute", {"mute": True})
-            log.info(f"Mute on: {result}")
-            cmd_done(api_ok(result), {"action": "mute_on", "response": result})
-
-        elif cmd == "mute_off":
-            power = api_get("powerstatus").get("PowerStatus", "").upper()
-            if power == "STANDBY":
-                log.warning("mute_off requested while soundbar is STANDBY; command may be ignored by device")
-            result = api_post("mute", {"mute": False})
-            log.info(f"Mute off: {result}")
-            cmd_done(api_ok(result), {"action": "mute_off", "response": result})
-
-        elif cmd == "mute_toggle":
-            audio = get_audio_status()
-            currently_muted = (audio.get("mute") == "on") if audio else (_last_mute == "on")
-            result = api_post("mute", {"mute": not currently_muted})
-            log.info(f"Mute toggle (was {currently_muted}): {result}")
-            cmd_done(api_ok(result), {"action": "mute_toggle", "was": bool(currently_muted), "response": result})
-
-        elif cmd.startswith("input_"):
-            if not _config.getboolean("EXPERIMENTAL", "ENABLE_INPUT_SWITCHING", fallback=False):
-                log.warning(f"{cmd} ignored: input switching is not verified for this device and is disabled by default")
-                cmd_done(False, {"action": "input_switch", "error": "disabled_by_config"})
                 return
-            source = cmd[6:]  # "input_3" → "3"
-            if not source.isdigit():
-                log.warning(f"{cmd} ignored: invalid source id")
-                cmd_done(False, {"action": "input_switch", "error": "invalid_source"})
+            _, maximum = current_volume_target()
+            raw = percent_to_raw_volume(pct, maximum)
+            response = client.set_volume_raw(raw)
+            log.info(f"Volume set (FFAA): {pct}% → raw {raw}: {response}")
+            return
+
+        if cmd == "volume_up":
+            current_raw, maximum = current_volume_target()
+            step_pct = _config.getint("SOUNDBAR", "VOLUME_STEP", fallback=5)
+            target_pct = min(100, raw_volume_to_percent(current_raw, maximum) + step_pct)
+            raw = percent_to_raw_volume(target_pct, maximum)
+            response = client.set_volume_raw(raw)
+            log.info(f"Volume up (FFAA): raw {current_raw} → {raw} ({target_pct}%): {response}")
+            return
+
+        if cmd == "volume_down":
+            current_raw, maximum = current_volume_target()
+            step_pct = _config.getint("SOUNDBAR", "VOLUME_STEP", fallback=5)
+            target_pct = max(0, raw_volume_to_percent(current_raw, maximum) - step_pct)
+            raw = percent_to_raw_volume(target_pct, maximum)
+            response = client.set_volume_raw(raw)
+            log.info(f"Volume down (FFAA): raw {current_raw} → {raw} ({target_pct}%): {response}")
+            return
+
+        if cmd in ("mute_on", "mute_off", "mute_toggle"):
+            log.warning(f"{cmd} ignored: mute is not yet reverse-engineered on the pure FFAA backend")
+            return
+
+        if cmd.startswith("input_"):
+            source_id = cmd[6:]
+            mapping = mappings.get(source_id)
+            if not mapping:
+                log.warning(f"{cmd} ignored: no FFAA mapping configured for source {source_id!r}")
                 return
+            mode = current_sound_mode()
+            response = client.set_input(mapping.byte1, mapping.byte2, mode)
+            log.info(
+                f"Input switch (FFAA): source {source_id} ({mapping.name}) → "
+                f"{mapping.byte1:02X},{mapping.byte2:02X}, mode {mode}: {response}"
+            )
+            return
 
-            luci_ok = bool(ip) and _adb_connect(ip) and _send_luci_local(ip, 245, f"INPUTSOURCE:{source}")
-            if luci_ok:
-                log.info(f"Input switched via LUCI to source {source}")
-                cmd_done(True, {"action": "input_switch_luci", "target": source})
-                return
-
-            if not _config.getboolean("EXPERIMENTAL", "ENABLE_UNSAFE_HTTP_INPUT", fallback=False):
-                log.warning(f"{cmd} failed: LUCI input switch unavailable and unsafe HTTP fallback disabled")
-                cmd_done(False, {"action": "input_switch", "error": "luci_failed_http_fallback_disabled"})
-                return
-
-            # Last resort: known unstable on this firmware, keep opt-in only.
-            result = api_post("input", {"InputSource": source})
-            if not api_ok(result):
-                result = api_post("input", {"inputsource": source})
-            log.info(f"Input HTTP fallback → {source!r}: {result}")
-            cmd_done(api_ok(result), {"action": "input_switch_http_fallback", "target": source, "response": result})
-
-        else:
-            log.warning(f"Unknown command: {cmd!r}")
-            cmd_done(False, {"action": "unknown", "error": "unknown_command"})
-
+        log.warning(f"Unknown command: {cmd!r}")
     except Exception as e:
         log.error(f"Command '{cmd}' failed: {type(e).__name__}: {e}")
-        _trace_publish("error", _trace_payload("command_exception", command=cmd, error=f"{type(e).__name__}: {e}"), retain=True)
 
 
-# ---------------------------------------------------------------------------
-# MQTT setup
-# ---------------------------------------------------------------------------
-
-def get_mqtt_connection() -> tuple:
-    """Read MQTT host/port/credentials from LoxBerry's general.json."""
+def get_mqtt_connection() -> tuple[str, int, str, str]:
     try:
         with open("/opt/loxberry/config/system/general.json") as f:
             data = json.load(f)
@@ -935,15 +521,10 @@ def get_mqtt_connection() -> tuple:
 
 def setup_mqtt() -> mqtt.Client:
     try:
-        # paho-mqtt 2.x
-        client = mqtt.Client(
-            mqtt.CallbackAPIVersion.VERSION1,
-            client_id="cantonbar-monitor",
-            clean_session=True,
-        )
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1, client_id="cantonbar-monitor", clean_session=True)
     except AttributeError:
-        # paho-mqtt 1.x
         client = mqtt.Client(client_id="cantonbar-monitor", clean_session=True)
+
     client.on_connect = on_mqtt_connect
     client.on_disconnect = on_mqtt_disconnect
     client.on_message = on_mqtt_message
@@ -955,22 +536,15 @@ def setup_mqtt() -> mqtt.Client:
 
     state_topic = _config.get("MQTT", "STATE_TOPIC", fallback="loxberry/plugin/cantonbar/state")
     client.will_set(state_topic, "standby", qos=1, retain=True)
-
     client.connect_async(host, port, keepalive=60)
     client.loop_start()
     log.info(f"MQTT connecting to {host}:{port}")
     return client
 
 
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
-
 def run_poll_loop() -> None:
-    global _api_fail_streak, _power_transition_noted
     poll_interval = _config.getint("MONITOR", "POLL_INTERVAL", fallback=5)
-    log.info(f"Starting poll loop (interval={poll_interval}s)")
-    publish_health(force=True)
+    log.info(f"Starting FFAA poll loop (interval={poll_interval}s)")
 
     while not _shutdown.is_set():
         config_path = _config.get("_meta", "config_path")
@@ -978,45 +552,7 @@ def run_poll_loop() -> None:
         poll_interval = _config.getint("MONITOR", "POLL_INTERVAL", fallback=5)
 
         state = get_soundbar_state()
-        if state.get("_api_ok"):
-            _api_fail_streak = 0
-            _health["api"] = "up"
-            _health["libreknx"] = "running"
-            _power_transition_noted = False
-        else:
-            if api_down_expected_after_standby():
-                # During intentional standby, transport failures are expected.
-                _health["api"] = "unknown"
-                if not _power_transition_noted:
-                    log.info("API down expected after standby command; suppressing auto-recovery during grace window")
-                    trace_event(
-                        "api_down_expected_after_standby",
-                        target="standby",
-                        grace_until=int(_power_transition_until),
-                    )
-                    _power_transition_noted = True
-            else:
-                _api_fail_streak += 1
-                _health["api"] = "down"
-                _power_transition_noted = False
-
-        if state.get("_power_confirmed") and _power_transition_target and state.get("power") == _power_transition_target:
-            trace_event("power_transition_confirmed", target=_power_transition_target, power=state.get("power"))
-            clear_power_transition()
-        elif _power_transition_target and not in_power_transition():
-            trace_event("power_transition_timeout", target=_power_transition_target)
-            clear_power_transition()
-
-        threshold = _config.getint("RECOVERY", "FAILURE_THRESHOLD", fallback=3)
-        if _api_fail_streak >= threshold:
-            maybe_recover_libreknx()
-
-        if _health["api"] == "up":
-            refresh_api_token()
-
         publish_state(state)
-        publish_health()
-
         _shutdown.wait(timeout=poll_interval)
 
     log.info("Poll loop exiting.")
@@ -1030,7 +566,7 @@ def handle_signal(signum, frame) -> None:
 def main() -> None:
     global _config, _mqtt_client
 
-    parser = argparse.ArgumentParser(description="Canton Smart Soundbar monitor daemon")
+    parser = argparse.ArgumentParser(description="Canton Smart Soundbar FFAA monitor daemon")
     parser.add_argument("--config", required=True, help="Path to cantonbar.cfg")
     parser.add_argument("--logfile", required=True, help="Path to log file")
     args = parser.parse_args()
@@ -1044,14 +580,17 @@ def main() -> None:
     loglevel = _config.getint("MONITOR", "LOGLEVEL", fallback=4)
     setup_logging(args.logfile, loglevel)
 
-    log.warning("Canton Smart Soundbar monitor starting")
+    log.warning("Canton Smart Soundbar FFAA monitor starting")
     log.info(f"Config: {args.config}  |  Log level: {loglevel}")
 
     ip = _config.get("SOUNDBAR", "IP", fallback="").strip()
+    port = _config.getint("SOUNDBAR", "PORT", fallback=50006)
     if not ip:
-        log.warning("Soundbar IP is not configured — HTTP commands will fail. Set IP in the web UI.")
+        log.warning("Soundbar IP is not configured — FFAA commands will fail. Set IP in the web UI.")
     else:
-        log.info(f"Soundbar IP: {ip}")
+        log.info(f"Soundbar FFAA target: {ip}:{port}")
+
+    log.info(f"Configured FFAA input mappings: {mapping_name_json(load_input_mappings())}")
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
@@ -1065,7 +604,6 @@ def main() -> None:
     else:
         log.warning("MQTT did not connect within 10s — continuing anyway")
 
-    refresh_api_token()
 
     try:
         run_poll_loop()

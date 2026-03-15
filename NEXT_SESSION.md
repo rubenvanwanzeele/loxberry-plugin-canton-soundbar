@@ -2,26 +2,32 @@
 
 ## 2026-03-15 Checkpoint (latest)
 
-- Verified from Linux host against `192.168.1.20`:
-  - `adb shell LUCI_local 70 STANDBYON` / `STANDBYOFF` reliably toggles power.
-  - `adb shell LUCI_local 245 INPUTSOURCE:N` reliably switches input (tested `3`, `7`, `8`).
-  - `GET action=sources` is stable and returns mapping (`ARC=3`, `AUX=1`, `BT=2`, `...`).
-  - `GET action=status` remains unstable (frequent timeouts).
-  - `GET action=volumeStatus` is better but still intermittent and appears stale on this firmware.
-- `bin/monitor.py` updated to:
-  - Prefer `volumeStatus` with fallback to `status` for mute/volume polling.
-  - Use LUCI MID 245 for `input_N` commands (HTTP input is now explicit fallback only).
-  - Use the same audio-status helper for `volume_up`, `volume_down`, and `mute_toggle`.
-- `webfrontend/htmlauth/index.php` text updated to reflect LUCI input switching and `volumeStatus` polling.
+- Major breakthrough: the Soundbar 10 speaks the same **FFAA binary protocol over TCP port `50006`** as the public Home Assistant `ha-canton-smart-connect` project.
+- Physically confirmed on the real device:
+  - `FFAA CMD_POWER (0x0006)` payload `0x00` → standby works
+  - `FFAA CMD_POWER (0x0006)` payload `0x01` → power on works
+  - `FFAA CMD_VOLUME (0x000C)` payload raw volume byte → volume changes audibly
+  - `FFAA CMD_INPUT_MODE (0x0003)` works for at least these tuples:
+    - source `0` / `NET` → bytes `17,13` with mode `02`
+    - source `3` / `ARC` → bytes `06,02` with mode `02`
+- Pure FFAA rewrite started:
+  - `bin/monitor.py` was rewritten to use TCP `50006` for power/input/volume polling and commands.
+  - `webfrontend/htmlauth/index.php` was redesigned around the new FFAA backend with a Samsung-inspired card layout.
+  - `config/cantonbar.cfg` now defaults to `PORT=50006` and has an `[FFAA_INPUTS]` section.
+  - `plugin.cfg` version bumped to `0.2.0`.
+- Important limitation:
+  - mute is **not yet reverse-engineered on FFAA**; new daemon publishes `unsupported` instead of faking mute state.
 
 ### Next validation focus
 
-1. Verify on LoxBerry that `input_N` works end-to-end through MQTT using LUCI path.
-2. Confirm power transitions in UI/logs now match physical state after LUCI `STANDBYON/OFF`.
-3. Decide how to treat stale/intermittent volume reads (`volumeStatus`) for published MQTT state:
-   - keep local command override,
-   - increase timeout,
-   - or move to LUCI-derived state in a future iteration.
+1. Install the pure-FFAA rewrite on LoxBerry and verify end-to-end MQTT commands:
+   - `power_on`
+   - `power_off`
+   - `volume_up` / `volume_down` / `volume_set_N`
+   - `input_0` / `input_3`
+2. Confirm the redesigned UI feels aligned enough with the Samsung plugin.
+3. Reverse-engineer FFAA mute (or consciously keep it unsupported in pure-FFAA mode).
+4. Expand `[FFAA_INPUTS]` mappings with more physically confirmed tuples if needed.
 
 ## 2026-03-14 Checkpoint (latest)
 

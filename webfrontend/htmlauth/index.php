@@ -5,12 +5,85 @@ require_once "/opt/loxberry/libs/phplib/loxberry_io.php";
 
 $lbpconfigdir = $lbpconfigdir ?? "/opt/loxberry/config/plugins/cantonbar";
 $lbplogdir    = $lbplogdir    ?? "/opt/loxberry/log/plugins/cantonbar";
+$cfgfile      = "$lbpconfigdir/cantonbar.cfg";
+$logfile      = "$lbplogdir/monitor.log";
 
-// -------------------------------------------------------------------------
-// Helper: read MQTT broker connection details from LoxBerry general.json
-// -------------------------------------------------------------------------
+function cfg_read(string $file): array {
+    $plugin_cfg = parse_ini_file($file, true);
+    return $plugin_cfg ?: [];
+}
+
+function cfg_write(string $file, array $plugin_cfg): void {
+    $out = "";
+    foreach ($plugin_cfg as $section => $pairs) {
+        $out .= "[$section]\n";
+        foreach ($pairs as $key => $value) {
+            $out .= $key . '=' . str_replace(["\r", "\n"], '', (string)$value) . "\n";
+        }
+        $out .= "\n";
+    }
+    file_put_contents($file, $out);
+}
+
+function cfg_get(array $plugin_cfg, string $section, string $key, string $default = ''): string {
+    return isset($plugin_cfg[$section][$key]) ? (string)$plugin_cfg[$section][$key] : $default;
+}
+
+function ffaa_default_map(): array {
+    return [
+        '0' => '17,13,NET',
+        '3' => '06,02,ARC',
+    ];
+}
+
+function ffaa_map_to_text(array $section): string {
+    if (empty($section)) {
+        $section = ffaa_default_map();
+    }
+    uksort($section, function($a, $b) {
+        if (ctype_digit((string)$a) && ctype_digit((string)$b)) {
+            return (int)$a <=> (int)$b;
+        }
+        return strcmp((string)$a, (string)$b);
+    });
+    $lines = [];
+    foreach ($section as $sourceId => $value) {
+        $lines[] = trim((string)$sourceId) . '=' . trim((string)$value);
+    }
+    return implode("\n", $lines);
+}
+
+function ffaa_map_from_text(string $text): array {
+    $map = [];
+    $lines = preg_split('/\R+/', $text) ?: [];
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '' || $line[0] === '#') {
+            continue;
+        }
+        if (strpos($line, '=') === false) {
+            continue;
+        }
+        [$sourceId, $value] = array_map('trim', explode('=', $line, 2));
+        if ($sourceId === '' || $value === '') {
+            continue;
+        }
+        $map[$sourceId] = $value;
+    }
+    return $map ?: ffaa_default_map();
+}
+
+function ffaa_names_json(array $map): string {
+    $out = [];
+    foreach ($map as $sourceId => $value) {
+        $parts = array_values(array_filter(array_map('trim', explode(',', (string)$value)), 'strlen'));
+        $out[(string)$sourceId] = $parts[2] ?? ('SRC_' . $sourceId);
+    }
+    ksort($out, SORT_NATURAL);
+    return json_encode($out);
+}
+
 function get_mqtt_details(): array {
-    // LoxBerry-native helper (same approach as Samsung plugin UI)
     if (function_exists('mqtt_connectiondetails')) {
         $mqtt_cred = mqtt_connectiondetails();
         return [
@@ -21,13 +94,12 @@ function get_mqtt_details(): array {
         ];
     }
 
-    // Defensive fallback for environments where helper is unavailable
-    $gen = @json_decode(@file_get_contents('/opt/loxberry/config/system/general.json'), true);
+    $general = @json_decode(@file_get_contents('/opt/loxberry/config/system/general.json'), true);
     return [
-        'host' => $gen['Mqtt']['Brokerhost'] ?? 'localhost',
-        'port' => (string)($gen['Mqtt']['Brokerport'] ?? '1883'),
-        'user' => $gen['Mqtt']['Brokeruser'] ?? '',
-        'pass' => $gen['Mqtt']['Brokerpass'] ?? '',
+        'host' => $general['Mqtt']['Brokerhost'] ?? 'localhost',
+        'port' => (string)($general['Mqtt']['Brokerport'] ?? '1883'),
+        'user' => $general['Mqtt']['Brokeruser'] ?? '',
+        'pass' => $general['Mqtt']['Brokerpass'] ?? '',
     ];
 }
 
@@ -38,7 +110,8 @@ function mqsub(array $mq, string $topic): string {
     $cmd = 'mosquitto_sub -h ' . escapeshellarg($mq['host'])
          . ' -p ' . (int)$mq['port']
          . ' ' . $auth
-         . '-t ' . escapeshellarg($topic) . ' -C 1 -W 2 2>/dev/null';
+         . '-t ' . escapeshellarg($topic)
+         . ' -C 1 -W 2 2>/dev/null';
     return trim(shell_exec($cmd) ?: '');
 }
 
@@ -50,515 +123,439 @@ function mqpub(array $mq, string $topic, string $payload): void {
          . ' -p ' . (int)$mq['port']
          . ' ' . $auth
          . '-t ' . escapeshellarg($topic)
-         . ' -m ' . escapeshellarg($payload) . ' 2>/dev/null';
+         . ' -m ' . escapeshellarg($payload)
+         . ' 2>/dev/null';
     shell_exec($cmd);
 }
 
-// -------------------------------------------------------------------------
-// AJAX: live status
-// -------------------------------------------------------------------------
+$plugin_cfg = cfg_read($cfgfile);
+$ffaa_map_section = $plugin_cfg['FFAA_INPUTS'] ?? ffaa_default_map();
+$ffaa_map_text = ffaa_map_to_text($ffaa_map_section);
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'status') {
     header('Content-Type: application/json');
-    header('Cache-Control: no-store');
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    header('Pragma: no-cache');
 
-    $plugin_cfg = parse_ini_file("$lbpconfigdir/cantonbar.cfg", true) ?: [];
-    $state_t    = $plugin_cfg['MQTT']['STATE_TOPIC']  ?? 'loxberry/plugin/cantonbar/state';
-    $volume_t   = $plugin_cfg['MQTT']['VOLUME_TOPIC'] ?? 'loxberry/plugin/cantonbar/volume';
-    $mute_t     = $plugin_cfg['MQTT']['MUTE_TOPIC']   ?? 'loxberry/plugin/cantonbar/mute';
-    $input_t    = $plugin_cfg['MQTT']['INPUT_TOPIC']  ?? 'loxberry/plugin/cantonbar/input';
-    $input_name_t = $plugin_cfg['MQTT']['INPUT_NAME_TOPIC'] ?? 'loxberry/plugin/cantonbar/input_name';
-    $input_map_t  = $plugin_cfg['MQTT']['INPUT_MAP_TOPIC'] ?? 'loxberry/plugin/cantonbar/input_map';
-    $health_base = $plugin_cfg['MQTT']['HEALTH_BASE_TOPIC'] ?? 'loxberry/plugin/cantonbar/health';
-    $api_health_t = $plugin_cfg['MQTT']['API_HEALTH_TOPIC'] ?? ($health_base . '/api');
-    $adb_health_t = $plugin_cfg['MQTT']['ADB_HEALTH_TOPIC'] ?? ($health_base . '/adb');
-    $libreknx_health_t = $plugin_cfg['MQTT']['LIBREKNX_HEALTH_TOPIC'] ?? ($health_base . '/libreknx');
-    $token_health_t = $plugin_cfg['MQTT']['TOKEN_HEALTH_TOPIC'] ?? ($health_base . '/token');
+    $stateTopic = cfg_get($plugin_cfg, 'MQTT', 'STATE_TOPIC', 'loxberry/plugin/cantonbar/state');
+    $volumeTopic = cfg_get($plugin_cfg, 'MQTT', 'VOLUME_TOPIC', 'loxberry/plugin/cantonbar/volume');
+    $muteTopic = cfg_get($plugin_cfg, 'MQTT', 'MUTE_TOPIC', 'loxberry/plugin/cantonbar/mute');
+    $inputTopic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_TOPIC', 'loxberry/plugin/cantonbar/input');
+    $inputNameTopic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_NAME_TOPIC', 'loxberry/plugin/cantonbar/input_name');
+    $inputMapTopic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_MAP_TOPIC', 'loxberry/plugin/cantonbar/input_map');
 
     $mq = get_mqtt_details();
+    $fallbackInputMapJson = ffaa_names_json($plugin_cfg['FFAA_INPUTS'] ?? ffaa_default_map());
+    $inputMap = mqsub($mq, $inputMapTopic);
+
     echo json_encode([
-        'state'   => mqsub($mq, $state_t)  ?: 'unknown',
-        'volume'  => mqsub($mq, $volume_t) ?: '-',
-        'mute'    => mqsub($mq, $mute_t)   ?: '-',
-        'input'   => mqsub($mq, $input_t)  ?: '-',
-        'input_name' => mqsub($mq, $input_name_t) ?: '-',
-        'input_map' => mqsub($mq, $input_map_t) ?: '',
-        'api'     => mqsub($mq, $api_health_t) ?: 'unknown',
-        'adb'     => mqsub($mq, $adb_health_t) ?: 'unknown',
-        'libreknx'=> mqsub($mq, $libreknx_health_t) ?: 'unknown',
-        'token'   => mqsub($mq, $token_health_t) ?: 'unknown',
+        'state' => mqsub($mq, $stateTopic) ?: 'unknown',
+        'volume' => mqsub($mq, $volumeTopic) ?: '-',
+        'mute' => mqsub($mq, $muteTopic) ?: 'unsupported',
+        'input' => mqsub($mq, $inputTopic) ?: '-',
+        'input_name' => mqsub($mq, $inputNameTopic) ?: '-',
+        'input_map' => $inputMap !== '' ? $inputMap : $fallbackInputMapJson,
+        'backend' => 'FFAA / TCP 50006',
         'updated' => date('H:i:s'),
     ]);
     exit;
 }
 
-// -------------------------------------------------------------------------
-// Load config
-// -------------------------------------------------------------------------
-$plugin_cfg   = parse_ini_file("$lbpconfigdir/cantonbar.cfg", true) ?: [];
-$sb_ip        = $plugin_cfg['SOUNDBAR']['IP']           ?? '';
-$sb_mac       = $plugin_cfg['SOUNDBAR']['MAC']          ?? '';
-$vol_step     = $plugin_cfg['SOUNDBAR']['VOLUME_STEP']  ?? '5';
-$state_topic  = $plugin_cfg['MQTT']['STATE_TOPIC']      ?? 'loxberry/plugin/cantonbar/state';
-$volume_topic = $plugin_cfg['MQTT']['VOLUME_TOPIC']     ?? 'loxberry/plugin/cantonbar/volume';
-$mute_topic   = $plugin_cfg['MQTT']['MUTE_TOPIC']       ?? 'loxberry/plugin/cantonbar/mute';
-$input_topic  = $plugin_cfg['MQTT']['INPUT_TOPIC']      ?? 'loxberry/plugin/cantonbar/input';
-$input_name_topic = $plugin_cfg['MQTT']['INPUT_NAME_TOPIC'] ?? 'loxberry/plugin/cantonbar/input_name';
-$input_map_topic  = $plugin_cfg['MQTT']['INPUT_MAP_TOPIC']  ?? 'loxberry/plugin/cantonbar/input_map';
-$cmd_topic    = $plugin_cfg['MQTT']['CMD_TOPIC']        ?? 'loxberry/plugin/cantonbar/cmd';
-$poll_int     = $plugin_cfg['MONITOR']['POLL_INTERVAL'] ?? '5';
-$loglevel     = $plugin_cfg['MONITOR']['LOGLEVEL']      ?? '4';
-$status_timeout = $plugin_cfg['MONITOR']['STATUS_TIMEOUT'] ?? '2';
-$recover_threshold = $plugin_cfg['RECOVERY']['FAILURE_THRESHOLD'] ?? '3';
-$recover_cooldown  = $plugin_cfg['RECOVERY']['COOLDOWN_SECONDS']  ?? '90';
-$token_action      = $plugin_cfg['RECOVERY']['TOKEN_ACTION']      ?? '';
-$enable_power_off = !empty($plugin_cfg['EXPERIMENTAL']['ENABLE_POWER_OFF']) && $plugin_cfg['EXPERIMENTAL']['ENABLE_POWER_OFF'] !== '0';
-$enable_input_switching = !empty($plugin_cfg['EXPERIMENTAL']['ENABLE_INPUT_SWITCHING']) && $plugin_cfg['EXPERIMENTAL']['ENABLE_INPUT_SWITCHING'] !== '0';
-$enable_unsafe_http_input = !empty($plugin_cfg['EXPERIMENTAL']['ENABLE_UNSAFE_HTTP_INPUT']) && $plugin_cfg['EXPERIMENTAL']['ENABLE_UNSAFE_HTTP_INPUT'] !== '0';
+$sb_ip = cfg_get($plugin_cfg, 'SOUNDBAR', 'IP', '');
+$sb_port = cfg_get($plugin_cfg, 'SOUNDBAR', 'PORT', '50006');
+$sb_mac = cfg_get($plugin_cfg, 'SOUNDBAR', 'MAC', '');
+$vol_step = cfg_get($plugin_cfg, 'SOUNDBAR', 'VOLUME_STEP', '5');
+$state_topic = cfg_get($plugin_cfg, 'MQTT', 'STATE_TOPIC', 'loxberry/plugin/cantonbar/state');
+$volume_topic = cfg_get($plugin_cfg, 'MQTT', 'VOLUME_TOPIC', 'loxberry/plugin/cantonbar/volume');
+$mute_topic = cfg_get($plugin_cfg, 'MQTT', 'MUTE_TOPIC', 'loxberry/plugin/cantonbar/mute');
+$input_topic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_TOPIC', 'loxberry/plugin/cantonbar/input');
+$input_name_topic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_NAME_TOPIC', 'loxberry/plugin/cantonbar/input_name');
+$input_map_topic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_MAP_TOPIC', 'loxberry/plugin/cantonbar/input_map');
+$cmd_topic = cfg_get($plugin_cfg, 'MQTT', 'CMD_TOPIC', 'loxberry/plugin/cantonbar/cmd');
+$poll_int = cfg_get($plugin_cfg, 'MONITOR', 'POLL_INTERVAL', '5');
+$loglevel = cfg_get($plugin_cfg, 'MONITOR', 'LOGLEVEL', '4');
+$status_timeout = cfg_get($plugin_cfg, 'MONITOR', 'STATUS_TIMEOUT', '2');
 
-$save_msg = '';
-$save_ok  = true;
-$cmd_sent = false;
+$message = '';
+$messageType = 'info';
+$cmdSent = false;
 $refresh_after_cmd = false;
 
-// -------------------------------------------------------------------------
-// Save config
-// -------------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_config') {
-    $new_ip      = trim($_POST['sb_ip']       ?? '');
-    $new_mac     = trim($_POST['sb_mac']       ?? '');
-    $new_step    = max(1, min(20, (int)($_POST['vol_step']    ?? 5)));
-    $new_state_t = trim($_POST['state_topic']  ?? $state_topic);
-    $new_vol_t   = trim($_POST['volume_topic'] ?? $volume_topic);
-    $new_mute_t  = trim($_POST['mute_topic']   ?? $mute_topic);
-    $new_input_t = trim($_POST['input_topic']  ?? $input_topic);
-    $new_input_name_t = trim($_POST['input_name_topic'] ?? $input_name_topic);
-    $new_input_map_t  = trim($_POST['input_map_topic']  ?? $input_map_topic);
-    $new_cmd_t   = trim($_POST['cmd_topic']    ?? $cmd_topic);
-    $new_poll    = max(1, min(60, (int)($_POST['poll_int']  ?? 5)));
-    $new_ll      = max(1, min(6,  (int)($_POST['loglevel'] ?? 4)));
-    $new_status_timeout = max(1, min(10, (int)($_POST['status_timeout'] ?? 2)));
-    $new_fail_threshold = max(1, min(20, (int)($_POST['recover_threshold'] ?? 3)));
-    $new_cooldown = max(10, min(3600, (int)($_POST['recover_cooldown'] ?? 90)));
-    $new_token_action = trim($_POST['token_action'] ?? '');
-    $new_enable_power_off = isset($_POST['enable_power_off']) ? 1 : 0;
-    $new_enable_input_switching = isset($_POST['enable_input_switching']) ? 1 : 0;
-    $new_enable_unsafe_http_input = isset($_POST['enable_unsafe_http_input']) ? 1 : 0;
+    $plugin_cfg['SOUNDBAR']['IP'] = trim($_POST['sb_ip'] ?? '');
+    $plugin_cfg['SOUNDBAR']['PORT'] = (string)max(1, min(65535, (int)($_POST['sb_port'] ?? 50006)));
+    $plugin_cfg['SOUNDBAR']['MAC'] = strtoupper(str_replace('-', ':', trim($_POST['sb_mac'] ?? '')));
+    $plugin_cfg['SOUNDBAR']['VOLUME_STEP'] = (string)max(1, min(20, (int)($_POST['vol_step'] ?? 5)));
 
-    // Normalize manually entered MAC.
-    if ($new_mac !== '') {
-        $new_mac = strtoupper(str_replace('-', ':', $new_mac));
-    }
+    $plugin_cfg['MQTT']['STATE_TOPIC'] = trim($_POST['state_topic'] ?? $state_topic);
+    $plugin_cfg['MQTT']['VOLUME_TOPIC'] = trim($_POST['volume_topic'] ?? $volume_topic);
+    $plugin_cfg['MQTT']['MUTE_TOPIC'] = trim($_POST['mute_topic'] ?? $mute_topic);
+    $plugin_cfg['MQTT']['INPUT_TOPIC'] = trim($_POST['input_topic'] ?? $input_topic);
+    $plugin_cfg['MQTT']['INPUT_NAME_TOPIC'] = trim($_POST['input_name_topic'] ?? $input_name_topic);
+    $plugin_cfg['MQTT']['INPUT_MAP_TOPIC'] = trim($_POST['input_map_topic'] ?? $input_map_topic);
+    $plugin_cfg['MQTT']['CMD_TOPIC'] = trim($_POST['cmd_topic'] ?? $cmd_topic);
 
-    // Auto-fill MAC from the device's own API (safer than ARP, which can return unrelated MACs).
-    if ($new_mac === '' && $new_ip !== '') {
-        $ctx = stream_context_create(['http' => ['timeout' => 2]]);
-        $info_raw = @file_get_contents("http://$new_ip:1904/canton?action=info", false, $ctx);
-        if ($info_raw !== false) {
-            $info_json = @json_decode($info_raw, true);
-            $api_mac = $info_json['MACAddress'] ?? '';
-            if (is_string($api_mac) && preg_match('/^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/i', $api_mac)) {
-                $new_mac = strtoupper($api_mac);
-            }
-        }
-    }
-
-    // NOTE: named $cfg_content — never use $cfg (reserved by LoxBerry SDK for its own global)
-    $cfg_content  = "[SOUNDBAR]\n";
-    $cfg_content .= "IP=$new_ip\n";
-    $cfg_content .= "MAC=$new_mac\n";
-    $cfg_content .= "VOLUME_STEP=$new_step\n\n";
-    $cfg_content .= "[MQTT]\n";
-    $cfg_content .= "STATE_TOPIC=$new_state_t\n";
-    $cfg_content .= "VOLUME_TOPIC=$new_vol_t\n";
-    $cfg_content .= "MUTE_TOPIC=$new_mute_t\n";
-    $cfg_content .= "INPUT_TOPIC=$new_input_t\n";
-    $cfg_content .= "INPUT_NAME_TOPIC=$new_input_name_t\n";
-    $cfg_content .= "INPUT_MAP_TOPIC=$new_input_map_t\n";
-    $cfg_content .= "CMD_TOPIC=$new_cmd_t\n\n";
-    $cfg_content .= "[MONITOR]\n";
-    $cfg_content .= "POLL_INTERVAL=$new_poll\n";
-    $cfg_content .= "LOGLEVEL=$new_ll\n";
-    $cfg_content .= "STATUS_TIMEOUT=$new_status_timeout\n\n";
-    $cfg_content .= "[RECOVERY]\n";
-    $cfg_content .= "FAILURE_THRESHOLD=$new_fail_threshold\n";
-    $cfg_content .= "COOLDOWN_SECONDS=$new_cooldown\n";
-    $cfg_content .= "TOKEN_ACTION=$new_token_action\n\n";
-    $cfg_content .= "[EXPERIMENTAL]\n";
-    $cfg_content .= "ENABLE_POWER_OFF=$new_enable_power_off\n";
-    $cfg_content .= "ENABLE_INPUT_SWITCHING=$new_enable_input_switching\n";
-    $cfg_content .= "ENABLE_UNSAFE_HTTP_INPUT=$new_enable_unsafe_http_input\n";
+    $plugin_cfg['MONITOR']['POLL_INTERVAL'] = (string)max(1, min(60, (int)($_POST['poll_int'] ?? 5)));
+    $plugin_cfg['MONITOR']['LOGLEVEL'] = (string)max(3, min(5, (int)($_POST['loglevel'] ?? 4)));
+    $plugin_cfg['MONITOR']['STATUS_TIMEOUT'] = (string)max(1, min(10, (int)($_POST['status_timeout'] ?? 2)));
+    $plugin_cfg['FFAA_INPUTS'] = ffaa_map_from_text($_POST['ffaa_map'] ?? '');
 
     @mkdir($lbpconfigdir, 0755, true);
-    $written = file_put_contents("$lbpconfigdir/cantonbar.cfg", $cfg_content);
+    cfg_write($cfgfile, $plugin_cfg);
+    shell_exec('sudo /bin/systemctl restart cantonbar.service 2>&1');
 
-    if ($written === false) {
-        $save_msg = "Error: could not write config file to $lbpconfigdir/cantonbar.cfg";
-        $save_ok  = false;
-    } else {
-        shell_exec("sudo /bin/systemctl restart cantonbar.service 2>&1");
-        $sb_ip = $new_ip; $sb_mac = $new_mac; $vol_step = $new_step;
-        $state_topic = $new_state_t; $volume_topic = $new_vol_t;
-        $mute_topic  = $new_mute_t;  $input_topic  = $new_input_t;
-        $input_name_topic = $new_input_name_t; $input_map_topic = $new_input_map_t;
-        $cmd_topic   = $new_cmd_t;   $poll_int = $new_poll; $loglevel = $new_ll;
-        $status_timeout = $new_status_timeout;
-        $recover_threshold = $new_fail_threshold;
-        $recover_cooldown = $new_cooldown;
-        $token_action = $new_token_action;
-        $enable_power_off = (bool)$new_enable_power_off;
-        $enable_input_switching = (bool)$new_enable_input_switching;
-        $enable_unsafe_http_input = (bool)$new_enable_unsafe_http_input;
-        $save_msg = "Configuration saved. Daemon restarted.";
-    }
+    $plugin_cfg = cfg_read($cfgfile);
+    $ffaa_map_text = ffaa_map_to_text($plugin_cfg['FFAA_INPUTS'] ?? ffaa_default_map());
+    $sb_ip = cfg_get($plugin_cfg, 'SOUNDBAR', 'IP', '');
+    $sb_port = cfg_get($plugin_cfg, 'SOUNDBAR', 'PORT', '50006');
+    $sb_mac = cfg_get($plugin_cfg, 'SOUNDBAR', 'MAC', '');
+    $vol_step = cfg_get($plugin_cfg, 'SOUNDBAR', 'VOLUME_STEP', '5');
+    $state_topic = cfg_get($plugin_cfg, 'MQTT', 'STATE_TOPIC', 'loxberry/plugin/cantonbar/state');
+    $volume_topic = cfg_get($plugin_cfg, 'MQTT', 'VOLUME_TOPIC', 'loxberry/plugin/cantonbar/volume');
+    $mute_topic = cfg_get($plugin_cfg, 'MQTT', 'MUTE_TOPIC', 'loxberry/plugin/cantonbar/mute');
+    $input_topic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_TOPIC', 'loxberry/plugin/cantonbar/input');
+    $input_name_topic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_NAME_TOPIC', 'loxberry/plugin/cantonbar/input_name');
+    $input_map_topic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_MAP_TOPIC', 'loxberry/plugin/cantonbar/input_map');
+    $cmd_topic = cfg_get($plugin_cfg, 'MQTT', 'CMD_TOPIC', 'loxberry/plugin/cantonbar/cmd');
+    $poll_int = cfg_get($plugin_cfg, 'MONITOR', 'POLL_INTERVAL', '5');
+    $loglevel = cfg_get($plugin_cfg, 'MONITOR', 'LOGLEVEL', '4');
+    $status_timeout = cfg_get($plugin_cfg, 'MONITOR', 'STATUS_TIMEOUT', '2');
+
+    $message = 'Configuration saved. FFAA daemon restarted.';
+    $messageType = 'success';
 }
 
-// -------------------------------------------------------------------------
-// Quick test command  (buttons-only form — NO text input inside, so button
-// values cannot be silently overwritten by an empty text field)
-// -------------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'test_cmd') {
-    $test_cmd = trim($_POST['test_cmd'] ?? '');
-    if ($test_cmd !== '' && $cmd_topic !== '') {
-        mqpub(get_mqtt_details(), $cmd_topic, $test_cmd);
-        $cmd_sent = true;
+    $testCmd = trim($_POST['test_cmd'] ?? '');
+    if ($testCmd !== '' && $cmd_topic !== '') {
+        mqpub(get_mqtt_details(), $cmd_topic, $testCmd);
+        $cmdSent = true;
         $refresh_after_cmd = true;
     }
 }
 
-// Custom free-text command (separate form, separate field name)
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'custom_cmd') {
-    $test_cmd = trim($_POST['custom_cmd_payload'] ?? '');
-    if ($test_cmd !== '' && $cmd_topic !== '') {
-        mqpub(get_mqtt_details(), $cmd_topic, $test_cmd);
-        $cmd_sent = true;
+    $payload = trim($_POST['custom_cmd_payload'] ?? '');
+    if ($payload !== '' && $cmd_topic !== '') {
+        mqpub(get_mqtt_details(), $cmd_topic, $payload);
+        $cmdSent = true;
         $refresh_after_cmd = true;
     }
 }
 
-// -------------------------------------------------------------------------
-// Restart daemon
-// -------------------------------------------------------------------------
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'restart_daemon') {
-    shell_exec("sudo /bin/systemctl restart cantonbar.service 2>&1");
-    $save_msg = "Daemon restarted.";
-    $save_ok  = true;
+    shell_exec('sudo /bin/systemctl restart cantonbar.service 2>&1');
+    $message = 'Daemon restarted.';
+    $messageType = 'success';
 }
 
-// -------------------------------------------------------------------------
-// Page output
-// -------------------------------------------------------------------------
-LBWeb::lbheader("Canton Smart Soundbar", "cantonbar", "help.html");
+LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
 ?>
 
-<div class="container-fluid" style="max-width:860px;">
+<style>
+.cb-wrap { max-width: 980px; margin: 0 auto; }
+.cb-card {
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 1px 6px rgba(0,0,0,.10);
+    padding: 22px 24px;
+    margin-bottom: 24px;
+}
+.cb-card h3 {
+    margin: 0 0 14px 0;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #eceff3;
+    font-size: 1.08rem;
+    font-weight: 600;
+}
+.cb-msg {
+    padding: 11px 14px;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    font-weight: 500;
+}
+.cb-msg.success { background: #d5f5e3; color: #1e8449; }
+.cb-msg.error   { background: #fadbd8; color: #922b21; }
+.cb-msg.info    { background: #d6eaf8; color: #1a5276; }
+.cb-hero {
+    display: grid;
+    grid-template-columns: 1.3fr .7fr;
+    gap: 16px;
+    align-items: stretch;
+}
+.cb-hero-main {
+    background: linear-gradient(135deg, #1f2a44 0%, #293a5a 100%);
+    color: #fff;
+    border-radius: 10px;
+    padding: 18px 20px;
+}
+.cb-hero-main small { color: rgba(255,255,255,.72); }
+.cb-power-badge {
+    display: inline-block;
+    padding: 8px 18px;
+    border-radius: 999px;
+    font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: .03em;
+}
+.cb-power-on { background: #27ae60; color: #fff; }
+.cb-power-standby { background: #f39c12; color: #fff; }
+.cb-power-unknown { background: #7f8c8d; color: #fff; }
+.cb-status-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0,1fr));
+    gap: 12px;
+}
+.cb-tile {
+    border: 1px solid #e6eaef;
+    border-radius: 10px;
+    background: #f8fafc;
+    padding: 14px 16px;
+}
+.cb-tile-label {
+    font-size: .76rem;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: #6b7785;
+    margin-bottom: 6px;
+}
+.cb-tile-value {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: #243447;
+}
+.cb-subtle { color: #6b7785; font-size: .9rem; }
+.cb-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0,1fr));
+    gap: 14px 20px;
+}
+.cb-field label {
+    display: block;
+    margin-bottom: 6px;
+    font-weight: 600;
+    color: #243447;
+}
+.cb-field input,
+.cb-field select,
+.cb-field textarea {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid #cfd7e3;
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: #fff;
+}
+.cb-field textarea { min-height: 120px; font-family: monospace; font-size: .92rem; }
+.cb-help { margin-top: 5px; color: #718096; font-size: .85rem; }
+.cb-section-title {
+    margin: 16px 0 10px;
+    font-size: .88rem;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: #7b8794;
+    font-weight: 700;
+}
+.cb-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.cb-actions .btn { border-radius: 999px; }
+.cb-log {
+    background: #151a21;
+    color: #d8dee9;
+    padding: 16px 18px;
+    border-radius: 8px;
+    font-size: .8rem;
+    max-height: 380px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    margin: 0;
+}
+@media (max-width: 900px) {
+    .cb-hero, .cb-grid, .cb-status-grid { grid-template-columns: 1fr; }
+}
+</style>
 
-<?php if ($save_msg): ?>
-<div class="alert alert-<?= $save_ok ? 'success' : 'danger' ?> alert-dismissible fade show" role="alert">
-    <?= htmlspecialchars($save_msg) ?>
-    <button type="button" class="close" data-dismiss="alert"><span>&times;</span></button>
-</div>
+<div class="cb-wrap">
+
+<?php if ($message !== ''): ?>
+    <div class="cb-msg <?= htmlspecialchars($messageType) ?>"><?= htmlspecialchars($message) ?></div>
 <?php endif; ?>
 
-<?php if ($cmd_sent): ?>
-<div class="alert alert-info alert-dismissible fade show" role="alert">
-    Command sent to MQTT topic <code><?= htmlspecialchars($cmd_topic) ?></code>.
-    <button type="button" class="close" data-dismiss="alert"><span>&times;</span></button>
-</div>
-<?php endif; ?>
-
-<!-- ===== Live Status ===== -->
-<div class="card mb-4">
-    <div class="card-header d-flex justify-content-between align-items-center">
-        <span>Live Status</span>
-        <small class="text-muted">Auto-refreshes every 5&thinsp;s &nbsp;&bull;&nbsp; Last updated: <span id="st-time">–</span></small>
+<?php if ($cmdSent): ?>
+    <div class="cb-msg info">
+        Command sent to <code><?= htmlspecialchars($cmd_topic) ?></code>.
     </div>
-    <div class="card-body">
-        <div class="row">
-            <div class="col-md-6 mb-2 mb-md-0">
-                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
-                    <strong>Power</strong>
-                    <span id="st-state"><span class="badge badge-secondary">unknown</span></span>
-                </div>
+<?php endif; ?>
+
+<div class="cb-card">
+    <h3>Live Status</h3>
+    <div class="cb-hero">
+        <div class="cb-hero-main">
+            <div class="cb-subtle">Pure FFAA backend &middot; auto-refresh every 5 seconds</div>
+            <div style="margin-top:14px; margin-bottom:10px;">
+                <span id="st-state" class="cb-power-badge cb-power-unknown">UNKNOWN</span>
             </div>
-            <div class="col-md-6 mb-2 mb-md-0">
-                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
-                    <strong>Volume</strong>
-                    <span class="font-weight-bold" id="st-volume">–</span>
-                </div>
+            <div style="font-size:1.1rem; font-weight:600;" id="st-input-main">Input &ndash;</div>
+            <small>Last updated: <span id="st-time">&ndash;</span></small>
+        </div>
+        <div class="cb-status-grid">
+            <div class="cb-tile">
+                <div class="cb-tile-label">Volume</div>
+                <div class="cb-tile-value" id="st-volume">&ndash;</div>
             </div>
-            <div class="col-md-6 mt-md-2 mb-2 mb-md-0">
-                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
-                    <strong>Mute</strong>
-                    <span class="font-weight-bold" id="st-mute">–</span>
-                </div>
+            <div class="cb-tile">
+                <div class="cb-tile-label">Mute</div>
+                <div class="cb-tile-value" id="st-mute">FFAA only</div>
             </div>
-            <div class="col-md-6 mt-md-2">
-                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
-                    <strong>Input</strong>
-                    <span class="font-weight-bold" id="st-input">–</span>
-                </div>
+            <div class="cb-tile">
+                <div class="cb-tile-label">Current Source ID</div>
+                <div class="cb-tile-value" id="st-input-id">&ndash;</div>
             </div>
-            <div class="col-md-6 mt-md-2">
-                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
-                    <strong>API</strong>
-                    <span id="st-api"><span class="badge badge-secondary">unknown</span></span>
-                </div>
-            </div>
-            <div class="col-md-6 mt-md-2">
-                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
-                    <strong>ADB</strong>
-                    <span id="st-adb"><span class="badge badge-secondary">unknown</span></span>
-                </div>
-            </div>
-            <div class="col-md-6 mt-md-2">
-                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
-                    <strong>LibreKNX</strong>
-                    <span id="st-libreknx"><span class="badge badge-secondary">unknown</span></span>
-                </div>
-            </div>
-            <div class="col-md-6 mt-md-2">
-                <div class="d-flex justify-content-between align-items-center border rounded px-3 py-2 bg-light">
-                    <strong>Token</strong>
-                    <span id="st-token"><span class="badge badge-secondary">unknown</span></span>
-                </div>
+            <div class="cb-tile">
+                <div class="cb-tile-label">Transport</div>
+                <div class="cb-tile-value" id="st-backend">FFAA / TCP 50006</div>
             </div>
         </div>
     </div>
 </div>
 
-<!-- ===== Configuration ===== -->
-<div class="card mb-4">
-    <div class="card-header">Configuration</div>
-    <div class="card-body">
-        <form method="post">
+<div class="cb-card">
+    <h3>Configuration</h3>
+    <form method="post">
         <input type="hidden" name="action" value="save_config">
 
-        <h6 class="text-muted mb-3">Soundbar</h6>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">IP Address</label>
-            <div class="col-sm-5">
-                <input type="text" name="sb_ip" class="form-control" value="<?= htmlspecialchars($sb_ip) ?>" placeholder="192.168.1.x">
+        <div class="cb-section-title">Soundbar</div>
+        <div class="cb-grid">
+            <div class="cb-field">
+                <label for="sb_ip">IP address</label>
+                <input type="text" id="sb_ip" name="sb_ip" value="<?= htmlspecialchars($sb_ip) ?>" placeholder="192.168.1.x">
             </div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">MAC Address <small class="text-muted">(WoL)</small></label>
-            <div class="col-sm-5">
-                <input type="text" name="sb_mac" class="form-control" value="<?= htmlspecialchars($sb_mac) ?>" placeholder="auto-discovered">
-                <small class="form-text text-muted">Leave blank to auto-discover from <code>action=info</code> on save. Required for <code>power_on</code>.</small>
+            <div class="cb-field">
+                <label for="sb_port">FFAA TCP port</label>
+                <input type="number" id="sb_port" name="sb_port" value="<?= htmlspecialchars($sb_port) ?>" min="1" max="65535">
+                <div class="cb-help">Default is <code>50006</code>.</div>
             </div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Volume Step</label>
-            <div class="col-sm-2">
-                <input type="number" name="vol_step" class="form-control" value="<?= (int)$vol_step ?>" min="1" max="20">
+            <div class="cb-field">
+                <label for="sb_mac">MAC address <small class="text-muted">(legacy)</small></label>
+                <input type="text" id="sb_mac" name="sb_mac" value="<?= htmlspecialchars($sb_mac) ?>" placeholder="optional">
+                <div class="cb-help">Kept for compatibility, but the current backend uses direct FFAA power on/off instead of WoL.</div>
+            </div>
+            <div class="cb-field">
+                <label for="vol_step">Volume step (%)</label>
+                <input type="number" id="vol_step" name="vol_step" value="<?= htmlspecialchars($vol_step) ?>" min="1" max="20">
             </div>
         </div>
 
-        <hr>
-        <h6 class="text-muted mb-3">MQTT Topics</h6>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">State topic</label>
-            <div class="col-sm-8"><input type="text" name="state_topic" class="form-control" value="<?= htmlspecialchars($state_topic) ?>"></div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Volume topic</label>
-            <div class="col-sm-8"><input type="text" name="volume_topic" class="form-control" value="<?= htmlspecialchars($volume_topic) ?>"></div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Mute topic</label>
-            <div class="col-sm-8"><input type="text" name="mute_topic" class="form-control" value="<?= htmlspecialchars($mute_topic) ?>"></div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Input topic</label>
-            <div class="col-sm-8"><input type="text" name="input_topic" class="form-control" value="<?= htmlspecialchars($input_topic) ?>"></div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Input name topic</label>
-            <div class="col-sm-8"><input type="text" name="input_name_topic" class="form-control" value="<?= htmlspecialchars($input_name_topic) ?>"></div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Input map topic</label>
-            <div class="col-sm-8"><input type="text" name="input_map_topic" class="form-control" value="<?= htmlspecialchars($input_map_topic) ?>"></div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Command topic</label>
-            <div class="col-sm-8"><input type="text" name="cmd_topic" class="form-control" value="<?= htmlspecialchars($cmd_topic) ?>"></div>
+        <div class="cb-section-title">MQTT Topics</div>
+        <div class="cb-grid">
+            <div class="cb-field"><label>State topic</label><input type="text" name="state_topic" value="<?= htmlspecialchars($state_topic) ?>"></div>
+            <div class="cb-field"><label>Volume topic</label><input type="text" name="volume_topic" value="<?= htmlspecialchars($volume_topic) ?>"></div>
+            <div class="cb-field"><label>Mute topic</label><input type="text" name="mute_topic" value="<?= htmlspecialchars($mute_topic) ?>"></div>
+            <div class="cb-field"><label>Input topic</label><input type="text" name="input_topic" value="<?= htmlspecialchars($input_topic) ?>"></div>
+            <div class="cb-field"><label>Input name topic</label><input type="text" name="input_name_topic" value="<?= htmlspecialchars($input_name_topic) ?>"></div>
+            <div class="cb-field"><label>Input map topic</label><input type="text" name="input_map_topic" value="<?= htmlspecialchars($input_map_topic) ?>"></div>
+            <div class="cb-field" style="grid-column:1 / -1;"><label>Command topic</label><input type="text" name="cmd_topic" value="<?= htmlspecialchars($cmd_topic) ?>"></div>
         </div>
 
-        <hr>
-        <h6 class="text-muted mb-3">Daemon</h6>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Poll Interval (s)</label>
-            <div class="col-sm-2">
-                <input type="number" name="poll_int" class="form-control" value="<?= (int)$poll_int ?>" min="1" max="60">
+        <div class="cb-section-title">Daemon</div>
+        <div class="cb-grid">
+            <div class="cb-field">
+                <label for="poll_int">Poll interval (seconds)</label>
+                <input type="number" id="poll_int" name="poll_int" value="<?= htmlspecialchars($poll_int) ?>" min="1" max="60">
             </div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Log Level</label>
-            <div class="col-sm-4">
-                <select name="loglevel" class="form-control">
-                    <?php foreach ([3 => 'Warning (3)', 4 => 'Info (4)', 5 => 'Debug (5)'] as $v => $l): ?>
-                    <option value="<?= $v ?>"<?= $v === (int)$loglevel ? ' selected' : '' ?>><?= $l ?></option>
+            <div class="cb-field">
+                <label for="loglevel">Log level</label>
+                <select id="loglevel" name="loglevel">
+                    <?php foreach ([3 => 'Warning (3)', 4 => 'Info (4)', 5 => 'Debug (5)'] as $value => $label): ?>
+                        <option value="<?= $value ?>"<?= (int)$loglevel === $value ? ' selected' : '' ?>><?= htmlspecialchars($label) ?></option>
                     <?php endforeach; ?>
                 </select>
-                <small class="form-text text-muted">Change takes effect after daemon restart.</small>
             </div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Status timeout (s)</label>
-            <div class="col-sm-2">
-                <input type="number" name="status_timeout" class="form-control" value="<?= (int)$status_timeout ?>" min="1" max="10">
+            <div class="cb-field">
+                <label for="status_timeout">Socket timeout (seconds)</label>
+                <input type="number" id="status_timeout" name="status_timeout" value="<?= htmlspecialchars($status_timeout) ?>" min="1" max="10">
+                <div class="cb-help">Used for FFAA TCP reads on port 50006.</div>
             </div>
-            <div class="col-sm-6"><small class="form-text text-muted">Timeout for audio status polling (<code>action=volumeStatus</code>, legacy fallback <code>action=status</code>).</small></div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">API failure threshold</label>
-            <div class="col-sm-2">
-                <input type="number" name="recover_threshold" class="form-control" value="<?= (int)$recover_threshold ?>" min="1" max="20">
-            </div>
-            <div class="col-sm-6"><small class="form-text text-muted">How many failed API checks before auto-recovery via ADB.</small></div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Recovery cooldown (s)</label>
-            <div class="col-sm-2">
-                <input type="number" name="recover_cooldown" class="form-control" value="<?= (int)$recover_cooldown ?>" min="10" max="3600">
-            </div>
-            <div class="col-sm-6"><small class="form-text text-muted">Minimum delay between recovery attempts.</small></div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Token action</label>
-            <div class="col-sm-4">
-                <input type="text" name="token_action" class="form-control" value="<?= htmlspecialchars($token_action) ?>" placeholder="optional, e.g. token">
-                <small class="form-text text-muted">If set, daemon calls this action after recovery/start and stores token health status.</small>
-            </div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Experimental power off</label>
-            <div class="col-sm-8">
-                <div class="form-check mt-2">
-                    <input class="form-check-input" type="checkbox" name="enable_power_off" id="enable_power_off" value="1"<?= $enable_power_off ? ' checked' : '' ?>>
-                    <label class="form-check-label" for="enable_power_off">Enable network standby command</label>
-                </div>
-                <small class="form-text text-muted">Disabled by default because current LibreKNX standby action returns HTTP 400 and can destabilize the API.</small>
-            </div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Experimental input switching</label>
-            <div class="col-sm-8">
-                <div class="form-check mt-2">
-                    <input class="form-check-input" type="checkbox" name="enable_input_switching" id="enable_input_switching" value="1"<?= $enable_input_switching ? ' checked' : '' ?>>
-                    <label class="form-check-label" for="enable_input_switching">Enable input_N commands</label>
-                </div>
-                <small class="form-text text-muted">Enables <code>input_N</code> commands via LUCI (<code>MID 245 INPUTSOURCE:N</code>).</small>
-            </div>
-        </div>
-        <div class="form-group row">
-            <label class="col-sm-4 col-form-label">Unsafe HTTP input write</label>
-            <div class="col-sm-8">
-                <div class="form-check mt-2">
-                    <input class="form-check-input" type="checkbox" name="enable_unsafe_http_input" id="enable_unsafe_http_input" value="1"<?= $enable_unsafe_http_input ? ' checked' : '' ?>>
-                    <label class="form-check-label" for="enable_unsafe_http_input">Allow <code>POST action=input</code> attempts</label>
-                </div>
-                <small class="form-text text-danger">Only enable for diagnostics. On current firmware this call frequently crashes LibreKNX.</small>
+            <div class="cb-field">
+                <label for="ffaa_map">FFAA input map</label>
+                <textarea id="ffaa_map" name="ffaa_map" spellcheck="false"><?= htmlspecialchars($ffaa_map_text) ?></textarea>
+                <div class="cb-help">One mapping per line: <code>source_id=BYTE1,BYTE2,Name</code> &mdash; example: <code>3=06,02,ARC</code>.</div>
             </div>
         </div>
 
-        <button type="submit" class="btn btn-primary">Save Configuration</button>
-        </form>
-    </div>
+        <div style="margin-top:18px;">
+            <button type="submit" class="btn btn-primary">Save Configuration</button>
+        </div>
+    </form>
 </div>
 
-<!-- ===== Test Controls ===== -->
-<div class="card mb-4">
-    <div class="card-header">Test Controls</div>
-    <div class="card-body">
+<div class="cb-card">
+    <h3>Command Center</h3>
 
-        <!-- Quick commands: buttons only, NO text input in this form -->
-        <form method="post" class="mb-3">
+    <div class="cb-section-title">Quick Actions</div>
+    <form method="post" class="mb-3">
         <input type="hidden" name="action" value="test_cmd">
-        <div class="d-flex flex-wrap" style="gap:6px;">
-            <button type="submit" name="test_cmd" value="power_on"    class="btn btn-success">Power On (WoL)</button>
-            <button type="submit" name="test_cmd" value="power_off"   class="btn btn-danger">Standby</button>
-            <button type="submit" name="test_cmd" value="volume_up"   class="btn btn-secondary">Vol +</button>
-            <button type="submit" name="test_cmd" value="volume_down" class="btn btn-secondary">Vol −</button>
-            <button type="submit" name="test_cmd" value="mute_on"     class="btn btn-warning">Mute</button>
-            <button type="submit" name="test_cmd" value="mute_off"    class="btn btn-info text-white">Unmute</button>
-            <button type="submit" name="test_cmd" value="mute_toggle" class="btn btn-outline-secondary">Mute Toggle</button>
+        <div class="cb-actions">
+            <button type="submit" name="test_cmd" value="power_on" class="btn btn-success">Power On</button>
+            <button type="submit" name="test_cmd" value="power_off" class="btn btn-danger">Standby</button>
+            <button type="submit" name="test_cmd" value="volume_down" class="btn btn-outline-secondary">Volume &minus;</button>
+            <button type="submit" name="test_cmd" value="volume_up" class="btn btn-outline-secondary">Volume +</button>
         </div>
-        </form>
+    </form>
 
-        <div class="small text-muted mb-3">
-            <strong>Note:</strong> <code>power_off</code> tries LUCI standby first. HTTP fallback stays guarded by <code>Experimental power off</code>.
-        </div>
+    <div class="cb-subtle" style="margin-bottom:14px;">
+        Mute is intentionally not exposed here yet: on the new pure-FFAA backend it has not been reverse-engineered reliably enough.
+    </div>
 
-        <form method="post" id="input-buttons-form" class="mb-3">
+    <div class="cb-section-title">Input Sources</div>
+    <form method="post" id="input-buttons-form" class="mb-3">
         <input type="hidden" name="action" value="test_cmd">
         <input type="hidden" name="test_cmd" id="input-buttons-cmd" value="">
-        <label class="d-block mb-2"><strong>Input Source Buttons</strong></label>
-        <div id="input-buttons" class="d-flex flex-wrap" style="gap:6px;">
-            <span class="text-muted small">Waiting for source map...</span>
+        <div id="input-buttons" class="cb-actions">
+            <span class="cb-subtle">Waiting for FFAA input map…</span>
         </div>
-        <small class="form-text text-muted">
-            Uses discovered sources from <code><?= htmlspecialchars($input_map_topic) ?></code> and sends <code>input_N</code> commands.
-            <?= $enable_input_switching ? '' : 'Enable Experimental input switching in Configuration to activate these buttons.' ?>
-        </small>
-        </form>
+    </form>
 
-        <!-- Custom command: separate form, different field name -->
-        <form method="post" class="mb-3">
+    <div class="cb-section-title">Custom Command</div>
+    <form method="post" class="mb-3">
         <input type="hidden" name="action" value="custom_cmd">
-        <div class="input-group" style="max-width:420px;">
+        <div class="input-group" style="max-width:460px;">
             <input type="text" name="custom_cmd_payload" class="form-control" placeholder="e.g. volume_set_40 or input_3">
             <div class="input-group-append">
                 <button type="submit" class="btn btn-outline-primary">Send</button>
             </div>
         </div>
-        </form>
+    </form>
 
-        <!-- Restart daemon -->
-        <form method="post">
+    <form method="post">
         <input type="hidden" name="action" value="restart_daemon">
-        <button type="submit" class="btn btn-secondary"
-                onclick="this.disabled=true; this.textContent='Restarting…'">Restart Daemon</button>
-        </form>
-
-    </div>
+        <button type="submit" class="btn btn-secondary" onclick="this.disabled=true; this.textContent='Restarting…';">Restart Daemon</button>
+    </form>
 </div>
 
-<!-- ===== Log viewer ===== -->
-<div class="card mb-4">
-    <div class="card-header">Log <small class="text-muted ml-1">(last 60 lines)</small></div>
-    <div class="card-body p-0">
-        <pre class="m-0 p-3" style="background:#1e1e1e;color:#d4d4d4;font-size:.78em;max-height:340px;overflow-y:auto;border-radius:0 0 .25rem .25rem;white-space:pre-wrap;"><?php
-$logfile = "$lbplogdir/monitor.log";
+<div class="cb-card">
+    <h3>Log</h3>
+    <pre class="cb-log"><?php
 if (file_exists($logfile) && filesize($logfile) > 0) {
     $lines = file($logfile);
-    echo htmlspecialchars(implode("", array_slice($lines, -60)));
+    echo htmlspecialchars(implode('', array_slice($lines, -80)));
 } elseif (file_exists($logfile)) {
     echo "Log file exists but is empty.\n";
-    echo "→ Enter the Soundbar IP above and click Save Configuration.\n";
-    echo "→ Then check:  systemctl status cantonbar.service";
+    echo "→ Enter the Soundbar IP above and save the configuration.\n";
+    echo "→ Then restart the daemon if needed.";
 } else {
     echo "Log file not found: $logfile\n";
-    echo "→ Check:  systemctl status cantonbar.service";
+    echo "→ Check whether cantonbar.service is installed and running.";
 }
 ?></pre>
-    </div>
 </div>
 
-</div><!-- /container-fluid -->
+</div>
 
 <script>
-var inputSwitchEnabled = <?= $enable_input_switching ? 'true' : 'false' ?>;
-
-function healthBadgeClass(v) {
-    if (v === 'up' || v === 'running' || v === 'connected' || v === 'ok') return 'badge-success';
-    if (v === 'recovering' || v === 'restarting') return 'badge-warning';
-    if (v === 'disabled') return 'badge-info';
-    if (v === 'unknown') return 'badge-secondary';
-    return 'badge-danger';
-}
-
 function htmlEscape(s) {
     return String(s || '')
         .replace(/&/g, '&amp;')
@@ -568,37 +565,17 @@ function htmlEscape(s) {
         .replace(/'/g, '&#39;');
 }
 
-function normalizeInputToken(rawName) {
-    return String(rawName || '')
-        .toUpperCase()
-        .replace(/[^A-Z0-9]+/g, '_')
-        .replace(/^_+|_+$/g, '');
+function powerBadgeClass(state) {
+    if (state === 'on') return 'cb-power-badge cb-power-on';
+    if (state === 'standby') return 'cb-power-badge cb-power-standby';
+    return 'cb-power-badge cb-power-unknown';
 }
 
-function translatedInputLabel(rawName, sourceId) {
-    var token = normalizeInputToken(rawName);
-    var map = {
-        HDMI_ARC: 'HDMI ARC',
-        HDMI: 'HDMI',
-        TV: 'TV',
-        BLUETOOTH: 'Bluetooth',
-        BT: 'Bluetooth',
-        AUX: 'AUX',
-        ANALOG: 'Analog',
-        OPTICAL: 'Optical',
-        SPDIF: 'Optical',
-        USB: 'USB',
-        AIRPLAY: 'AirPlay',
-        SPOTIFY: 'Spotify Connect',
-        CHROMECAST: 'Chromecast'
-    };
-    if (map[token]) {
-        return map[token];
-    }
-    if (rawName && String(rawName).trim() !== '') {
-        return String(rawName).replace(/_/g, ' ');
-    }
-    return 'Source ' + sourceId;
+function prettyMute(value) {
+    if (value === 'unsupported') return 'FFAA only';
+    if (value === 'on') return 'ON';
+    if (value === 'off') return 'OFF';
+    return '–';
 }
 
 function renderInputButtons(inputMapRaw, currentInput) {
@@ -606,12 +583,10 @@ function renderInputButtons(inputMapRaw, currentInput) {
     if (!holder) return;
 
     var parsed = {};
-    if (inputMapRaw && typeof inputMapRaw === 'string') {
-        try {
-            parsed = JSON.parse(inputMapRaw);
-        } catch (e) {
-            parsed = {};
-        }
+    try {
+        parsed = inputMapRaw ? JSON.parse(inputMapRaw) : {};
+    } catch (e) {
+        parsed = {};
     }
 
     var ids = Object.keys(parsed).sort(function(a, b) {
@@ -622,29 +597,22 @@ function renderInputButtons(inputMapRaw, currentInput) {
     });
 
     if (!ids.length) {
-        holder.innerHTML = '<span class="text-muted small">No source map received yet.</span>';
+        holder.innerHTML = '<span class="cb-subtle">No FFAA input mappings configured yet.</span>';
         return;
     }
 
     var current = String(currentInput || '');
-    var html = '';
-    ids.forEach(function(id) {
-        var rawName = parsed[id];
-        var label = translatedInputLabel(rawName, id);
-        var active = String(id) === current;
-        var cls = active ? 'btn-primary' : 'btn-outline-primary';
-        var disabled = inputSwitchEnabled ? '' : ' disabled';
-        var title = inputSwitchEnabled ? '' : ' title="Enable Experimental input switching first"';
-        html += '<button type="button" class="btn btn-sm ' + cls + '" data-input-source="' + htmlEscape(id) + '"' + disabled + title + '>'
-             + htmlEscape(label)
-             + ' <small class="text-monospace">(' + htmlEscape(id) + ')</small>'
-             + '</button>';
-    });
-    holder.innerHTML = html;
+    holder.innerHTML = ids.map(function(id) {
+        var active = id === current;
+        var cls = active ? 'btn btn-primary' : 'btn btn-outline-primary';
+        return '<button type="button" class="' + cls + '" data-input-source="' + htmlEscape(id) + '">'
+            + htmlEscape(parsed[id])
+            + ' <small class="text-monospace">(' + htmlEscape(id) + ')</small>'
+            + '</button>';
+    }).join('');
 }
 
 function sendInputCommand(sourceId) {
-    if (!inputSwitchEnabled) return;
     var cmdField = document.getElementById('input-buttons-cmd');
     var form = document.getElementById('input-buttons-form');
     if (!cmdField || !form) return;
@@ -656,49 +624,42 @@ function updateStatus() {
     fetch('index.php?ajax=status&_=' + Date.now())
         .then(function(r) { return r.json(); })
         .then(function(d) {
-            var s = d.state;
-            var cls = s === 'on'      ? 'badge-success' :
-                      s === 'standby' ? 'badge-warning'  : 'badge-secondary';
-            document.getElementById('st-state').innerHTML =
-                '<span class="badge ' + cls + ' badge-pill px-3 py-2">' + s.toUpperCase() + '</span>';
-            document.getElementById('st-volume').textContent =
-                d.volume !== '-' ? d.volume + '%' : '–';
-            document.getElementById('st-mute').textContent =
-                d.mute !== '-' ? (d.mute === 'on' ? 'ON' : 'OFF') : '–';
-            if (d.input !== '-') {
-                var inputText = String(d.input);
-                if (d.input_name && d.input_name !== '-' && d.input_name !== inputText) {
-                    inputText += ' (' + d.input_name + ')';
+            var state = String(d.state || 'unknown');
+            document.getElementById('st-state').className = powerBadgeClass(state);
+            document.getElementById('st-state').textContent = state.toUpperCase();
+            document.getElementById('st-volume').textContent = d.volume !== '-' ? (String(d.volume) + '%') : '–';
+            document.getElementById('st-mute').textContent = prettyMute(String(d.mute || 'unsupported'));
+            document.getElementById('st-input-id').textContent = d.input !== '-' ? String(d.input) : '–';
+            document.getElementById('st-backend').textContent = d.backend || 'FFAA / TCP 50006';
+            document.getElementById('st-time').textContent = d.updated || '–';
+
+            var inputMain = 'Input –';
+            if (d.input_name && d.input_name !== '-') {
+                inputMain = d.input_name;
+                if (d.input && d.input !== '-' && String(d.input) !== String(d.input_name)) {
+                    inputMain += '  (' + d.input + ')';
                 }
-                document.getElementById('st-input').textContent = inputText;
-            } else {
-                document.getElementById('st-input').textContent = '–';
+            } else if (d.input && d.input !== '-') {
+                inputMain = 'Input ' + d.input;
             }
-            renderInputButtons(d.input_map || '', d.input || '');
+            document.getElementById('st-input-main').textContent = inputMain;
 
-            document.getElementById('st-api').innerHTML =
-                '<span class="badge ' + healthBadgeClass(d.api) + ' badge-pill px-3 py-2">' + String(d.api).toUpperCase() + '</span>';
-            document.getElementById('st-adb').innerHTML =
-                '<span class="badge ' + healthBadgeClass(d.adb) + ' badge-pill px-3 py-2">' + String(d.adb).toUpperCase() + '</span>';
-            document.getElementById('st-libreknx').innerHTML =
-                '<span class="badge ' + healthBadgeClass(d.libreknx) + ' badge-pill px-3 py-2">' + String(d.libreknx).toUpperCase() + '</span>';
-            document.getElementById('st-token').innerHTML =
-                '<span class="badge ' + healthBadgeClass(d.token) + ' badge-pill px-3 py-2">' + String(d.token).toUpperCase() + '</span>';
-
-            document.getElementById('st-time').textContent = d.updated;
+            renderInputButtons(d.input_map || '{}', d.input || '');
         })
         .catch(function() {});
 }
+
 document.addEventListener('click', function(ev) {
     var btn = ev.target.closest('button[data-input-source]');
     if (!btn) return;
     sendInputCommand(btn.getAttribute('data-input-source'));
 });
+
 updateStatus();
 setInterval(updateStatus, 5000);
 <?php if ($refresh_after_cmd): ?>
-setTimeout(updateStatus, 2500);
-setTimeout(updateStatus, 5500);
+setTimeout(updateStatus, 1800);
+setTimeout(updateStatus, 4200);
 <?php endif; ?>
 </script>
 
