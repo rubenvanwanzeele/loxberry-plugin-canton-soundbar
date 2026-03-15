@@ -329,11 +329,11 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
         </tbody>
     </table>
     <div class="sf-actions" style="margin-top:14px;">
-        <a href="help.html" target="_blank" rel="noopener" class="sf-btn sf-btn-outline">Help</a>
         <form method="post" style="display:inline">
             <input type="hidden" name="action" value="restart_daemon">
             <button type="submit" class="sf-btn sf-btn-warning">Restart Daemon</button>
         </form>
+        <button type="button" class="sf-btn sf-btn-outline" onclick="window.open('help.html', '_blank', 'noopener');">Help</button>
     </div>
 </div>
 <div class="sf-card">
