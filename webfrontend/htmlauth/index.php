@@ -31,15 +31,15 @@ function cfg_get(array $plugin_cfg, string $section, string $key, string $defaul
 
 function ffaa_default_map(): array {
     return [
-        '0' => '17,13,NET',
-        '1' => '01,03,BDP',
-        '2' => '02,04,SAT',
-        '3' => '06,02,ARC',
-        '4' => '03,0E,PS',
-        '5' => '07,05,CD',
+        '0' => '01,03,BDP',
+        '1' => '02,04,SAT',
+        '2' => '03,0E,PS',
+        '3' => '06,02,TV',
+        '4' => '07,05,CD',
+        '5' => '0B,06,DVD',
         '6' => '0F,12,AUX',
-        '7' => '15,14,BT',
-        '8' => '0B,06,DVD',
+        '7' => '17,13,NET',
+        '8' => '15,14,BT',
     ];
 }
 
@@ -148,21 +148,17 @@ if (isset($_GET['ajax']) && $_GET['ajax'] === 'status') {
     $volumeTopic = cfg_get($plugin_cfg, 'MQTT', 'VOLUME_TOPIC', 'loxberry/plugin/cantonbar/volume');
     $muteTopic = cfg_get($plugin_cfg, 'MQTT', 'MUTE_TOPIC', 'loxberry/plugin/cantonbar/mute');
     $inputTopic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_TOPIC', 'loxberry/plugin/cantonbar/input');
-    $inputNameTopic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_NAME_TOPIC', 'loxberry/plugin/cantonbar/input_name');
-    $inputMapTopic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_MAP_TOPIC', 'loxberry/plugin/cantonbar/input_map');
     $soundModeTopic = cfg_get($plugin_cfg, 'MQTT', 'SOUND_MODE_TOPIC', 'loxberry/plugin/cantonbar/sound_mode');
 
     $mq = get_mqtt_details();
     $fallbackInputMapJson = ffaa_names_json($plugin_cfg['FFAA_INPUTS'] ?? ffaa_default_map());
-    $inputMap = mqsub($mq, $inputMapTopic);
 
     echo json_encode([
         'state' => mqsub($mq, $stateTopic) ?: 'unknown',
         'volume' => mqsub($mq, $volumeTopic) ?: '-',
         'mute' => mqsub($mq, $muteTopic) ?: 'unsupported',
         'input' => mqsub($mq, $inputTopic) ?: '-',
-        'input_name' => mqsub($mq, $inputNameTopic) ?: '-',
-        'input_map' => $inputMap !== '' ? $inputMap : $fallbackInputMapJson,
+        'input_map' => $fallbackInputMapJson,
         'sound_mode' => mqsub($mq, $soundModeTopic) ?: '-',
         'backend' => 'FFAA / TCP 50006',
         'updated' => date('H:i:s'),
@@ -178,8 +174,6 @@ $state_topic = cfg_get($plugin_cfg, 'MQTT', 'STATE_TOPIC', 'loxberry/plugin/cant
 $volume_topic = cfg_get($plugin_cfg, 'MQTT', 'VOLUME_TOPIC', 'loxberry/plugin/cantonbar/volume');
 $mute_topic = cfg_get($plugin_cfg, 'MQTT', 'MUTE_TOPIC', 'loxberry/plugin/cantonbar/mute');
 $input_topic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_TOPIC', 'loxberry/plugin/cantonbar/input');
-$input_name_topic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_NAME_TOPIC', 'loxberry/plugin/cantonbar/input_name');
-$input_map_topic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_MAP_TOPIC', 'loxberry/plugin/cantonbar/input_map');
 $sound_mode_topic = cfg_get($plugin_cfg, 'MQTT', 'SOUND_MODE_TOPIC', 'loxberry/plugin/cantonbar/sound_mode');
 $cmd_topic = cfg_get($plugin_cfg, 'MQTT', 'CMD_TOPIC', 'loxberry/plugin/cantonbar/cmd');
 $poll_int = cfg_get($plugin_cfg, 'MONITOR', 'POLL_INTERVAL', '5');
@@ -201,8 +195,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
     $plugin_cfg['MQTT']['VOLUME_TOPIC'] = trim($_POST['volume_topic'] ?? $volume_topic);
     $plugin_cfg['MQTT']['MUTE_TOPIC'] = trim($_POST['mute_topic'] ?? $mute_topic);
     $plugin_cfg['MQTT']['INPUT_TOPIC'] = trim($_POST['input_topic'] ?? $input_topic);
-    $plugin_cfg['MQTT']['INPUT_NAME_TOPIC'] = trim($_POST['input_name_topic'] ?? $input_name_topic);
-    $plugin_cfg['MQTT']['INPUT_MAP_TOPIC'] = trim($_POST['input_map_topic'] ?? $input_map_topic);
     $plugin_cfg['MQTT']['SOUND_MODE_TOPIC'] = trim($_POST['sound_mode_topic'] ?? $sound_mode_topic);
     $plugin_cfg['MQTT']['CMD_TOPIC'] = trim($_POST['cmd_topic'] ?? $cmd_topic);
 
@@ -225,8 +217,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'save_
     $volume_topic = cfg_get($plugin_cfg, 'MQTT', 'VOLUME_TOPIC', 'loxberry/plugin/cantonbar/volume');
     $mute_topic = cfg_get($plugin_cfg, 'MQTT', 'MUTE_TOPIC', 'loxberry/plugin/cantonbar/mute');
     $input_topic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_TOPIC', 'loxberry/plugin/cantonbar/input');
-    $input_name_topic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_NAME_TOPIC', 'loxberry/plugin/cantonbar/input_name');
-    $input_map_topic = cfg_get($plugin_cfg, 'MQTT', 'INPUT_MAP_TOPIC', 'loxberry/plugin/cantonbar/input_map');
     $sound_mode_topic = cfg_get($plugin_cfg, 'MQTT', 'SOUND_MODE_TOPIC', 'loxberry/plugin/cantonbar/sound_mode');
     $cmd_topic = cfg_get($plugin_cfg, 'MQTT', 'CMD_TOPIC', 'loxberry/plugin/cantonbar/cmd');
     $poll_int = cfg_get($plugin_cfg, 'MONITOR', 'POLL_INTERVAL', '5');
@@ -430,8 +420,8 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
                 <div class="cb-tile-value" id="st-mute">FFAA</div>
             </div>
             <div class="cb-tile">
-                <div class="cb-tile-label">Current Source ID</div>
-                <div class="cb-tile-value" id="st-input-id">&ndash;</div>
+                <div class="cb-tile-label">Current Input</div>
+                <div class="cb-tile-value" id="st-input">&ndash;</div>
             </div>
             <div class="cb-tile">
                 <div class="cb-tile-label">Play Mode</div>
@@ -472,15 +462,17 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
             </div>
         </div>
 
-        <div class="cb-section-title">MQTT Topics</div>
+        <div class="cb-section-title">MQTT (plugin → broker)</div>
         <div class="cb-grid">
             <div class="cb-field"><label>State topic</label><input type="text" name="state_topic" value="<?= htmlspecialchars($state_topic) ?>"></div>
             <div class="cb-field"><label>Volume topic</label><input type="text" name="volume_topic" value="<?= htmlspecialchars($volume_topic) ?>"></div>
             <div class="cb-field"><label>Mute topic</label><input type="text" name="mute_topic" value="<?= htmlspecialchars($mute_topic) ?>"></div>
             <div class="cb-field"><label>Input topic</label><input type="text" name="input_topic" value="<?= htmlspecialchars($input_topic) ?>"></div>
-            <div class="cb-field"><label>Input name topic</label><input type="text" name="input_name_topic" value="<?= htmlspecialchars($input_name_topic) ?>"></div>
-            <div class="cb-field"><label>Input map topic</label><input type="text" name="input_map_topic" value="<?= htmlspecialchars($input_map_topic) ?>"></div>
             <div class="cb-field"><label>Sound mode topic</label><input type="text" name="sound_mode_topic" value="<?= htmlspecialchars($sound_mode_topic) ?>"></div>
+        </div>
+
+        <div class="cb-section-title">MQTT (broker → plugin)</div>
+        <div class="cb-grid">
             <div class="cb-field" style="grid-column:1 / -1;"><label>Command topic</label><input type="text" name="cmd_topic" value="<?= htmlspecialchars($cmd_topic) ?>"></div>
         </div>
 
@@ -527,6 +519,7 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
             <button type="submit" name="test_cmd" value="power_off" class="btn btn-danger">Standby</button>
             <button type="submit" name="test_cmd" value="volume_down" class="btn btn-outline-secondary">Volume &minus;</button>
             <button type="submit" name="test_cmd" value="volume_up" class="btn btn-outline-secondary">Volume +</button>
+            <button type="submit" name="test_cmd" value="mute_on" class="btn btn-outline-secondary">Mute</button>
             <button type="submit" name="test_cmd" value="mute_toggle" class="btn btn-outline-secondary">Mute Toggle</button>
             <button type="submit" name="test_cmd" value="mute_off" class="btn btn-outline-secondary">Unmute</button>
         </div>
@@ -550,14 +543,14 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
             <span class="cb-subtle">Waiting for FFAA input map…</span>
         </div>
     </form>
-    <div class="cb-help" style="margin-top:0; margin-bottom:10px;">Buttons are generated from your FFAA map (default includes NET, BDP, SAT, ARC, PS, CD, AUX, BT, DVD).</div>
+    <div class="cb-help" style="margin-top:0; margin-bottom:10px;">Buttons are generated from your FFAA map (default order: BDP, SAT, PS, TV, CD, DVD, AUX, NET, BT).</div>
 
     <div class="cb-section-title">Single Command Topic Contract</div>
     <div class="cb-help" style="margin-bottom:10px;">Publish all payloads to <code><?= htmlspecialchars($cmd_topic) ?></code>.</div>
     <div class="cb-help" style="line-height:1.65;">
         <code>power_on</code>, <code>power_off</code>, <code>volume_up</code>, <code>volume_down</code>, <code>volume_set_N</code>,<br>
         <code>mode_stereo</code>, <code>mode_movie</code>, <code>mode_music</code>,<br>
-        <code>input_3</code> or alias style <code>input_arc</code>, <code>input_dvd</code>, <code>input_bt</code>, ...<br>
+        <code>input_bdp</code>, <code>input_sat</code>, <code>input_tv</code>, <code>input_dvd</code>, ...<br>
         <code>mute_on</code>, <code>mute_off</code>, <code>mute_toggle</code> (FFAA, with HTTP fallback only if needed)
     </div>
 
@@ -565,7 +558,7 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
     <form method="post" class="mb-3">
         <input type="hidden" name="action" value="custom_cmd">
         <div class="input-group" style="max-width:460px;">
-            <input type="text" name="custom_cmd_payload" class="form-control" placeholder="e.g. volume_set_40, input_dvd, mode_movie">
+            <input type="text" name="custom_cmd_payload" class="form-control" placeholder="e.g. volume_set_40, input_tv, mode_movie">
             <div class="input-group-append">
                 <button type="submit" class="btn btn-outline-primary">Send</button>
             </div>
@@ -648,20 +641,22 @@ function renderInputButtons(inputMapRaw, currentInput) {
 
     var current = String(currentInput || '');
     holder.innerHTML = ids.map(function(id) {
-        var active = id === current;
+        var name = String(parsed[id] || '');
+        var active = name.toLowerCase() === current.toLowerCase();
         var cls = active ? 'btn btn-success' : 'btn btn-outline-primary';
-        return '<button type="button" class="' + cls + '" data-input-source="' + htmlEscape(id) + '">'
-            + htmlEscape(parsed[id])
-            + ' <small class="text-monospace">(' + htmlEscape(id) + ')</small>'
+        return '<button type="button" class="' + cls + '" data-input-name="' + htmlEscape(name) + '">'
+            + htmlEscape(name)
             + '</button>';
     }).join('');
 }
 
-function sendInputCommand(sourceId) {
+function sendInputCommand(inputName) {
     var cmdField = document.getElementById('input-buttons-cmd');
     var form = document.getElementById('input-buttons-form');
     if (!cmdField || !form) return;
-    cmdField.value = 'input_' + sourceId;
+    var token = String(inputName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!token) return;
+    cmdField.value = 'input_' + token;
     form.submit();
 }
 
@@ -700,19 +695,14 @@ function updateStatus() {
             document.getElementById('st-state').textContent = state.toUpperCase();
             document.getElementById('st-volume').textContent = d.volume !== '-' ? (String(d.volume) + '%') : '–';
             document.getElementById('st-mute').textContent = prettyMute(String(d.mute || 'unsupported'));
-            document.getElementById('st-input-id').textContent = d.input !== '-' ? String(d.input) : '–';
+            document.getElementById('st-input').textContent = d.input !== '-' ? String(d.input) : '–';
             document.getElementById('st-sound-mode').textContent = d.sound_mode && d.sound_mode !== '-' ? String(d.sound_mode) : '–';
             document.getElementById('st-backend').textContent = d.backend || 'FFAA / TCP 50006';
             document.getElementById('st-time').textContent = d.updated || '–';
 
             var inputMain = 'Input –';
-            if (d.input_name && d.input_name !== '-') {
-                inputMain = d.input_name;
-                if (d.input && d.input !== '-' && String(d.input) !== String(d.input_name)) {
-                    inputMain += '  (' + d.input + ')';
-                }
-            } else if (d.input && d.input !== '-') {
-                inputMain = 'Input ' + d.input;
+            if (d.input && d.input !== '-') {
+                inputMain = String(d.input);
             }
             document.getElementById('st-input-main').textContent = inputMain;
 
@@ -725,9 +715,9 @@ function updateStatus() {
 }
 
 document.addEventListener('click', function(ev) {
-    var btn = ev.target.closest('button[data-input-source]');
+    var btn = ev.target.closest('button[data-input-name]');
     if (btn) {
-        sendInputCommand(btn.getAttribute('data-input-source'));
+        sendInputCommand(btn.getAttribute('data-input-name'));
         return;
     }
 

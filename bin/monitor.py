@@ -37,8 +37,6 @@ _last_state = ""
 _last_volume = ""
 _last_mute = ""
 _last_input = ""
-_last_input_name = ""
-_last_input_map_json = ""
 _last_sound_mode_text = ""
 
 _last_volume_raw = 0
@@ -54,15 +52,15 @@ SOUND_MODE_COMMANDS = {
     "music": 3,
 }
 DEFAULT_INPUT_MAPPINGS = {
-    "0": "17,13,NET",
-    "1": "01,03,BDP",
-    "2": "02,04,SAT",
-    "3": "06,02,ARC",
-    "4": "03,0E,PS",
-    "5": "07,05,CD",
+    "0": "01,03,BDP",
+    "1": "02,04,SAT",
+    "2": "03,0E,PS",
+    "3": "06,02,TV",
+    "4": "07,05,CD",
+    "5": "0B,06,DVD",
     "6": "0F,12,AUX",
-    "7": "15,14,BT",
-    "8": "0B,06,DVD",
+    "7": "17,13,NET",
+    "8": "15,14,BT",
 }
 
 
@@ -245,10 +243,6 @@ def load_input_mappings() -> dict[str, InputMapping]:
     return dict(sorted(mappings.items(), key=lambda item: int(item[0]) if item[0].isdigit() else item[0]))
 
 
-def mapping_name_json(mappings: dict[str, InputMapping]) -> str:
-    return json.dumps({source_id: mapping.name for source_id, mapping in mappings.items()}, sort_keys=True, separators=(",", ":"))
-
-
 def find_mapping_by_bytes(byte1: int, byte2: int, mappings: dict[str, InputMapping]) -> InputMapping | None:
     for mapping in mappings.values():
         if mapping.byte1 == byte1 and mapping.byte2 == byte2:
@@ -388,8 +382,7 @@ def get_soundbar_state() -> dict:
     mappings = load_input_mappings()
     fallback_power = _last_state if _last_state in ("on", "standby") else "standby"
     fallback_volume = int(_last_volume) if _last_volume.isdigit() else raw_volume_to_percent(_last_volume_raw, _last_volume_max)
-    fallback_input = _last_input if _last_input else "unknown"
-    fallback_input_name = _last_input_name if _last_input_name else "Unknown"
+    fallback_input = _last_input if _last_input else "Unknown"
 
     try:
         state = ffaa_client().query_state(include_supported_inputs=True)
@@ -400,10 +393,8 @@ def get_soundbar_state() -> dict:
             "volume": fallback_volume,
             "mute": _last_mute if _last_mute in ("on", "off") else "unsupported",
             "input": fallback_input,
-            "input_name": fallback_input_name,
             "sound_mode": SOUND_MODE_NAMES.get(_last_sound_mode, f"Mode {_last_sound_mode}"),
             "_ok": False,
-            "_input_map_json": mapping_name_json(mappings),
         }
 
     power = "on" if state.get("power_on") else "standby"
@@ -420,11 +411,9 @@ def get_soundbar_state() -> dict:
 
     mapping = find_mapping_by_bytes(input_b1, input_b2, mappings)
     if mapping:
-        input_value = mapping.source_id
-        input_name = mapping.name
+        input_value = mapping.name
     else:
-        input_value = f"raw_{input_b1:02X}{input_b2:02X}"
-        input_name = f"RAW {input_b1:02X}:{input_b2:02X}"
+        input_value = f"RAW {input_b1:02X}:{input_b2:02X}"
 
     for triple in state.get("supported_inputs", []):
         if len(triple) < 2:
@@ -447,31 +436,25 @@ def get_soundbar_state() -> dict:
         "volume": raw_volume_to_percent(volume_raw, volume_max),
         "mute": mute,
         "input": input_value,
-        "input_name": input_name,
         "sound_mode": SOUND_MODE_NAMES.get(sound_mode, f"Mode {sound_mode}"),
         "_ok": True,
-        "_input_map_json": mapping_name_json(mappings),
     }
 
 
 def publish_state(state: dict) -> None:
-    global _last_state, _last_volume, _last_mute, _last_input, _last_input_name, _last_input_map_json, _last_sound_mode_text
+    global _last_state, _last_volume, _last_mute, _last_input, _last_sound_mode_text
 
     state_topic = _config.get("MQTT", "STATE_TOPIC", fallback="loxberry/plugin/cantonbar/state")
     volume_topic = _config.get("MQTT", "VOLUME_TOPIC", fallback="loxberry/plugin/cantonbar/volume")
     mute_topic = _config.get("MQTT", "MUTE_TOPIC", fallback="loxberry/plugin/cantonbar/mute")
     input_topic = _config.get("MQTT", "INPUT_TOPIC", fallback="loxberry/plugin/cantonbar/input")
-    input_name_topic = _config.get("MQTT", "INPUT_NAME_TOPIC", fallback="loxberry/plugin/cantonbar/input_name")
-    input_map_topic = _config.get("MQTT", "INPUT_MAP_TOPIC", fallback="loxberry/plugin/cantonbar/input_map")
     mode_topic = _config.get("MQTT", "SOUND_MODE_TOPIC", fallback="loxberry/plugin/cantonbar/sound_mode")
 
     power = state["power"]
     volume = str(state["volume"])
     mute = state.get("mute", "unsupported")
     inp = state["input"]
-    inp_name = state.get("input_name", "Unknown")
     sound_mode = state.get("sound_mode", "Unknown")
-    input_map_json = state.get("_input_map_json", "{}")
 
     if power != _last_state:
         _publish(state_topic, power)
@@ -493,15 +476,6 @@ def publish_state(state: dict) -> None:
         log.info(f"Input → {inp!r}")
         _last_input = inp
 
-    if inp_name != _last_input_name:
-        _publish(input_name_topic, inp_name)
-        log.info(f"Input name → {inp_name!r}")
-        _last_input_name = inp_name
-
-    if input_map_json != _last_input_map_json:
-        _publish(input_map_topic, input_map_json)
-        _last_input_map_json = input_map_json
-
     if sound_mode != _last_sound_mode_text:
         _publish(mode_topic, sound_mode)
         log.info(f"Sound mode → {sound_mode!r}")
@@ -509,10 +483,8 @@ def publish_state(state: dict) -> None:
 
 
 def republish_all() -> None:
-    global _last_state, _last_volume, _last_mute, _last_input, _last_input_name, _last_input_map_json, _last_sound_mode_text
+    global _last_state, _last_volume, _last_mute, _last_input, _last_sound_mode_text
     _last_state = _last_volume = _last_mute = _last_input = ""
-    _last_input_name = ""
-    _last_input_map_json = ""
     _last_sound_mode_text = ""
 
 
@@ -761,7 +733,8 @@ def main() -> None:
     else:
         log.info(f"Soundbar FFAA target: {ip}:{port}")
 
-    log.info(f"Configured FFAA input mappings: {mapping_name_json(load_input_mappings())}")
+    mapping_names = {source_id: item.name for source_id, item in load_input_mappings().items()}
+    log.info(f"Configured FFAA input mappings: {json.dumps(mapping_names, sort_keys=True, separators=(',', ':'))}")
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)

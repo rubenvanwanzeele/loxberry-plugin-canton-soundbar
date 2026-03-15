@@ -16,19 +16,17 @@
   <li>The MAC field is optional and currently kept only for compatibility in configuration.</li>
 </ol>
 
-<h3>MQTT State Topics (plugin → Loxone)</h3>
+<h3>MQTT Outbound State Topics (plugin → broker/Loxone)</h3>
 <table>
   <tr><th>Topic</th><th>Values</th><th>Notes</th></tr>
   <tr><td><code>loxberry/plugin/cantonbar/state</code></td><td><code>on</code> / <code>standby</code></td><td>retained</td></tr>
   <tr><td><code>loxberry/plugin/cantonbar/volume</code></td><td>0–100</td><td>retained, integer</td></tr>
   <tr><td><code>loxberry/plugin/cantonbar/mute</code></td><td><code>on</code> / <code>off</code> / <code>unsupported</code></td><td>retained, FFAA-based (unsupported only on temporary comms failure)</td></tr>
-  <tr><td><code>loxberry/plugin/cantonbar/input</code></td><td>source ID (e.g. <code>3</code>)</td><td>retained</td></tr>
-  <tr><td><code>loxberry/plugin/cantonbar/input_name</code></td><td>friendly name (e.g. <code>ARC</code>)</td><td>retained</td></tr>
-  <tr><td><code>loxberry/plugin/cantonbar/input_map</code></td><td>JSON map source→name</td><td>retained</td></tr>
+  <tr><td><code>loxberry/plugin/cantonbar/input</code></td><td>friendly name (e.g. <code>TV</code>)</td><td>retained</td></tr>
   <tr><td><code>loxberry/plugin/cantonbar/sound_mode</code></td><td><code>Stereo</code> / <code>Movie</code> / <code>Music</code></td><td>retained</td></tr>
 </table>
 
-<h3>MQTT Commands (Loxone → plugin)</h3>
+<h3>MQTT Inbound Commands (broker/Loxone → plugin)</h3>
 <p>Publish every command payload to exactly one command topic: <code>loxberry/plugin/cantonbar/cmd</code> (or your configured command topic).</p>
 <table>
   <tr><th>Payload</th><th>Action</th></tr>
@@ -41,8 +39,7 @@
   <tr><td><code>mute_off</code></td><td>Unmute via FFAA (<code>0x0009</code>)</td></tr>
   <tr><td><code>mute_toggle</code></td><td>Toggle mute via FFAA (<code>0x0009</code>)</td></tr>
   <tr><td><code>mode_stereo</code>, <code>mode_movie</code>, <code>mode_music</code></td><td>Set play mode on current input</td></tr>
-  <tr><td><code>input_3</code></td><td>Switch to source ID 3</td></tr>
-  <tr><td><code>input_arc</code>, <code>input_dvd</code>, ...</td><td>Switch using configured source name aliases</td></tr>
+  <tr><td><code>input_tv</code>, <code>input_dvd</code>, ...</td><td>Switch using configured source name aliases</td></tr>
 </table>
 
 <p><strong>Play mode protocol note:</strong> implemented over FFAA command <code>0x0003</code> (<code>CMD_INPUT_MODE</code>) using payload byte 3: <code>1=Stereo</code>, <code>2=Movie</code>, <code>3=Music</code>.</p>
@@ -50,18 +47,18 @@
 <p><strong>Mute protocol note:</strong> implemented over FFAA command <code>0x0009</code> (query + set with payload <code>0/1</code>).</p>
 
 <h3>Default Input IDs</h3>
-<p>You can edit these in the web UI under <strong>FFAA input map</strong>.</p>
+<p>You can edit these in the web UI under <strong>FFAA input map</strong>. IDs are internal only; day-to-day control uses names (e.g. <code>input_tv</code>).</p>
 <table>
   <tr><th>ID</th><th>Name</th><th>FFAA bytes</th></tr>
-  <tr><td>0</td><td>NET</td><td>17,13</td></tr>
-  <tr><td>1</td><td>BDP</td><td>01,03</td></tr>
-  <tr><td>2</td><td>SAT</td><td>02,04</td></tr>
-  <tr><td>3</td><td>ARC</td><td>06,02</td></tr>
-  <tr><td>4</td><td>PS</td><td>03,0E</td></tr>
-  <tr><td>5</td><td>CD</td><td>07,05</td></tr>
+  <tr><td>0</td><td>BDP</td><td>01,03</td></tr>
+  <tr><td>1</td><td>SAT</td><td>02,04</td></tr>
+  <tr><td>2</td><td>PS</td><td>03,0E</td></tr>
+  <tr><td>3</td><td>TV</td><td>06,02</td></tr>
+  <tr><td>4</td><td>CD</td><td>07,05</td></tr>
+  <tr><td>5</td><td>DVD</td><td>0B,06</td></tr>
   <tr><td>6</td><td>AUX</td><td>0F,12</td></tr>
-  <tr><td>7</td><td>BT</td><td>15,14</td></tr>
-  <tr><td>8</td><td>DVD</td><td>0B,06</td></tr>
+  <tr><td>7</td><td>NET</td><td>17,13</td></tr>
+  <tr><td>8</td><td>BT</td><td>15,14</td></tr>
 </table>
 </body>
 </html>
