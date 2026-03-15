@@ -58,11 +58,11 @@ DEFAULT_INPUT_MAPPINGS = {
     "1": "01,03,BDP",
     "2": "02,04,SAT",
     "3": "06,02,ARC",
-    "4": "03,0E,CD",
-    "5": "07,05,DVD",
+    "4": "03,0E,PS",
+    "5": "07,05,CD",
     "6": "0F,12,AUX",
     "7": "15,14,BT",
-    "8": "0B,06,COAX",
+    "8": "0B,06,DVD",
 }
 
 
@@ -353,6 +353,19 @@ def set_mute_state(target: bool) -> bool:
     return legacy_http_post("mute", {"mute": bool(target)})
 
 
+def publish_mute_command_state(mute_state: str) -> None:
+    global _last_mute
+
+    if mute_state not in ("on", "off"):
+        return
+
+    mute_topic = _config.get("MQTT", "MUTE_TOPIC", fallback="loxberry/plugin/cantonbar/mute")
+    if mute_state != _last_mute:
+        _publish(mute_topic, mute_state)
+        log.info(f"Mute → {mute_state!r} (command sync)")
+    _last_mute = mute_state
+
+
 def _publish(topic: str, value: str, retain: bool = True) -> None:
     if not _mqtt_client:
         return
@@ -593,7 +606,14 @@ def handle_command(cmd: str) -> None:
                 target = cmd == "mute_on"
 
             if set_mute_state(target):
-                log.info(f"Mute set via legacy HTTP fallback: {'on' if target else 'off'}")
+                desired = "on" if target else "off"
+                confirmed = get_mute_state()
+                effective = confirmed if confirmed in ("on", "off") else desired
+                publish_mute_command_state(effective)
+                log.info(
+                    "Mute set via legacy HTTP fallback: "
+                    f"desired={desired}, confirmed={confirmed if confirmed != 'unsupported' else 'n/a'}"
+                )
             else:
                 log.warning("Mute command failed (legacy HTTP fallback disabled or unavailable)")
             return

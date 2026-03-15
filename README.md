@@ -27,6 +27,7 @@ All commands go to one configured command topic (default: `loxberry/plugin/canto
 
 ## FFAA Notes
 
+- Volume is implemented with `CMD_VOLUME (0x000C)` and converted to MQTT `0..100` percent.
 - Play mode is implemented with `CMD_INPUT_MODE (0x0003)` and payload byte 3 (`1=Stereo`, `2=Movie`, `3=Music`).
 - Input switching uses the same `CMD_INPUT_MODE (0x0003)` with bytes 1+2 from `[FFAA_INPUTS]`.
 - Mute over FFAA is still unconfirmed in this repo; mute commands currently use optional HTTP fallback.
@@ -39,11 +40,11 @@ Configured in `config/cantonbar.cfg` section `[FFAA_INPUTS]`:
 - `1=01,03,BDP`
 - `2=02,04,SAT`
 - `3=06,02,ARC`
-- `4=03,0E,CD`
-- `5=07,05,DVD`
+- `4=03,0E,PS`
+- `5=07,05,CD`
 - `6=0F,12,AUX`
 - `7=15,14,BT`
-- `8=0B,06,COAX`
+- `8=0B,06,DVD`
 
 You can edit these from the web UI (`FFAA input map`) if your device reports different tuples.
 

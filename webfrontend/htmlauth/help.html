@@ -46,6 +46,7 @@
 </table>
 
 <p><strong>Play mode protocol note:</strong> implemented over FFAA command <code>0x0003</code> (<code>CMD_INPUT_MODE</code>) using payload byte 3: <code>1=Stereo</code>, <code>2=Movie</code>, <code>3=Music</code>.</p>
+<p><strong>Volume protocol note:</strong> implemented over FFAA command <code>0x000C</code> (<code>CMD_VOLUME</code>), then published to MQTT as <code>0-100</code> percent.</p>
 
 <h3>Default Input IDs</h3>
 <p>You can edit these in the web UI under <strong>FFAA input map</strong>.</p>
@@ -55,11 +56,11 @@
   <tr><td>1</td><td>BDP</td><td>01,03</td></tr>
   <tr><td>2</td><td>SAT</td><td>02,04</td></tr>
   <tr><td>3</td><td>ARC</td><td>06,02</td></tr>
-  <tr><td>4</td><td>CD</td><td>03,0E</td></tr>
-  <tr><td>5</td><td>DVD</td><td>07,05</td></tr>
+  <tr><td>4</td><td>PS</td><td>03,0E</td></tr>
+  <tr><td>5</td><td>CD</td><td>07,05</td></tr>
   <tr><td>6</td><td>AUX</td><td>0F,12</td></tr>
   <tr><td>7</td><td>BT</td><td>15,14</td></tr>
-  <tr><td>8</td><td>COAX</td><td>0B,06</td></tr>
+  <tr><td>8</td><td>DVD</td><td>0B,06</td></tr>
 </table>
 </body>
 </html>

@@ -35,11 +35,11 @@ function ffaa_default_map(): array {
         '1' => '01,03,BDP',
         '2' => '02,04,SAT',
         '3' => '06,02,ARC',
-        '4' => '03,0E,CD',
-        '5' => '07,05,DVD',
+        '4' => '03,0E,PS',
+        '5' => '07,05,CD',
         '6' => '0F,12,AUX',
         '7' => '15,14,BT',
-        '8' => '0B,06,COAX',
+        '8' => '0B,06,DVD',
     ];
 }
 
@@ -377,6 +377,7 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
     gap: 8px;
 }
 .cb-actions .btn { border-radius: 999px; }
+#input-buttons { margin-bottom: 0; }
 .cb-log {
     background: #151a21;
     color: #d8dee9;
@@ -542,14 +543,14 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
     </form>
 
     <div class="cb-section-title">Input Sources</div>
-    <form method="post" id="input-buttons-form" class="mb-3">
+    <form method="post" id="input-buttons-form" style="margin-bottom:4px;">
         <input type="hidden" name="action" value="test_cmd">
         <input type="hidden" name="test_cmd" id="input-buttons-cmd" value="">
         <div id="input-buttons" class="cb-actions">
             <span class="cb-subtle">Waiting for FFAA input map…</span>
         </div>
     </form>
-    <div class="cb-help" style="margin-top:-6px; margin-bottom:10px;">Buttons are generated from your FFAA map (default includes NET, BDP, SAT, ARC, CD, DVD, AUX, BT, COAX).</div>
+    <div class="cb-help" style="margin-top:0; margin-bottom:10px;">Buttons are generated from your FFAA map (default includes NET, BDP, SAT, ARC, PS, CD, AUX, BT, DVD).</div>
 
     <div class="cb-section-title">Single Command Topic Contract</div>
     <div class="cb-help" style="margin-bottom:10px;">Publish all payloads to <code><?= htmlspecialchars($cmd_topic) ?></code>.</div>
