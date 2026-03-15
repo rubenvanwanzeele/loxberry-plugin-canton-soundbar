@@ -255,234 +255,130 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
 ?>
 
 <style>
-.cb-wrap { max-width: 980px; margin: 0 auto; }
-.cb-card {
-    background: #fff;
-    border-radius: 10px;
-    box-shadow: 0 1px 6px rgba(0,0,0,.10);
-    padding: 22px 24px;
-    margin-bottom: 24px;
+/* ── Canton Smart Soundbar – aligned with Samsung Frame TV plugin style ── */
+.sf-card { background:#fff; border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,.12); padding:20px 24px; margin-bottom:24px; }
+.sf-card h3 { margin-top:0; border-bottom:1px solid #eee; padding-bottom:8px; font-size:1.1em; }
+.sf-msg { padding:10px 14px; border-radius:4px; margin-bottom:16px; font-weight:500; }
+.sf-msg.success { background:#d5f5e3; color:#1e8449; }
+.sf-msg.error   { background:#fadbd8; color:#922b21; }
+.sf-msg.info    { background:#d6eaf8; color:#1a5276; }
+.sf-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px 24px; }
+.sf-grid label { font-weight:500; display:block; margin-bottom:4px; }
+.sf-grid input, .sf-grid select, .sf-grid textarea {
+    width:100%; padding:6px 8px; border:1px solid #ccc; border-radius:4px;
+    font-size:.95em; box-sizing:border-box;
 }
-.cb-card h3 {
-    margin: 0 0 14px 0;
-    padding-bottom: 10px;
-    border-bottom: 1px solid #eceff3;
-    font-size: 1.08rem;
-    font-weight: 600;
-}
-.cb-msg {
-    padding: 11px 14px;
-    border-radius: 6px;
-    margin-bottom: 16px;
-    font-weight: 500;
-}
-.cb-msg.success { background: #d5f5e3; color: #1e8449; }
-.cb-msg.error   { background: #fadbd8; color: #922b21; }
-.cb-msg.info    { background: #d6eaf8; color: #1a5276; }
-.cb-hero {
-    display: grid;
-    grid-template-columns: 1.3fr .7fr;
-    gap: 16px;
-    align-items: stretch;
-}
-.cb-hero-main {
-    background: linear-gradient(135deg, #1f2a44 0%, #293a5a 100%);
-    color: #fff;
-    border-radius: 10px;
-    padding: 18px 20px;
-}
-.cb-hero-main small { color: rgba(255,255,255,.72); }
-.cb-power-badge {
-    display: inline-block;
-    padding: 8px 18px;
-    border-radius: 999px;
-    font-size: 1.05rem;
-    font-weight: 700;
-    letter-spacing: .03em;
-    border: 0;
-}
-.cb-power-badge.cb-power-clickable { cursor: pointer; }
-.cb-power-on { background: #27ae60; color: #fff; }
-.cb-power-standby { background: #f39c12; color: #fff; }
-.cb-power-unknown { background: #7f8c8d; color: #fff; }
-.cb-power-busy { background: #3b82f6; color: #fff; }
-.cb-status-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0,1fr));
-    gap: 12px;
-}
-.cb-tile {
-    border: 1px solid #e6eaef;
-    border-radius: 10px;
-    background: #f8fafc;
-    padding: 14px 16px;
-}
-.cb-tile-label {
-    font-size: .76rem;
-    letter-spacing: .04em;
-    text-transform: uppercase;
-    color: #6b7785;
-    margin-bottom: 6px;
-}
-.cb-tile-value {
-    font-size: 1.05rem;
-    font-weight: 700;
-    color: #243447;
-}
-.cb-subtle { color: #6b7785; font-size: .9rem; }
-.cb-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0,1fr));
-    gap: 14px 20px;
-}
-.cb-field label {
-    display: block;
-    margin-bottom: 6px;
-    font-weight: 600;
-    color: #243447;
-}
-.cb-field input,
-.cb-field select,
-.cb-field textarea {
-    width: 100%;
-    box-sizing: border-box;
-    border: 1px solid #cfd7e3;
-    border-radius: 6px;
-    padding: 8px 10px;
-    background: #fff;
-}
-.cb-field textarea { min-height: 120px; font-family: monospace; font-size: .92rem; }
-.cb-help { margin-top: 5px; color: #718096; font-size: .85rem; }
-.cb-section-title {
-    margin: 16px 0 10px;
-    font-size: .88rem;
-    text-transform: uppercase;
-    letter-spacing: .06em;
-    color: #7b8794;
-    font-weight: 700;
-}
-.cb-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-}
-.cb-actions .btn { border-radius: 999px; }
-#input-buttons { margin-bottom: 0; }
-.cb-log {
-    background: #151a21;
-    color: #d8dee9;
-    padding: 16px 18px;
-    border-radius: 8px;
-    font-size: .8rem;
-    max-height: 380px;
-    overflow-y: auto;
-    white-space: pre-wrap;
-    margin: 0;
-}
-@media (max-width: 900px) {
-    .cb-hero, .cb-grid, .cb-status-grid { grid-template-columns: 1fr; }
-}
+.sf-grid textarea { min-height:120px; font-family:monospace; font-size:.88em; }
+.sf-grid .sf-help { color:#7f8c8d; font-size:.82em; margin-top:3px; }
+.sf-btn { padding:7px 16px; border:none; border-radius:4px; cursor:pointer; font-size:.9em; font-weight:500; }
+.sf-btn-primary { background:#2980b9; color:#fff; }
+.sf-btn-success { background:#27ae60; color:#fff; }
+.sf-btn-warning { background:#e67e22; color:#fff; }
+.sf-btn-danger  { background:#c0392b; color:#fff; }
+.sf-btn-purple  { background:#8e44ad; color:#fff; }
+.sf-btn-grey    { background:#7f8c8d; color:#fff; }
+.sf-btn-outline { background:#fff; color:#2980b9; border:1px solid #2980b9; }
+.sf-btn-busy    { background:#2980b9; color:#fff; }
+.sf-btn:hover { opacity:.87; }
+.sf-btn-row { display:flex; flex-wrap:wrap; gap:8px; }
+.sf-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.sf-muted { color:#7f8c8d; font-size:.9em; }
+.sf-state-badge { display:inline-block; padding:6px 18px; border-radius:20px; color:#fff; font-weight:600; font-size:1em; cursor:pointer; border:none; }
+.sf-state-on      { background:#27ae60; }
+.sf-state-standby { background:#e67e22; }
+.sf-state-unknown { background:#95a5a6; }
+.sf-state-busy    { background:#2980b9; }
+.sf-summary-table { width:100%; border-collapse:collapse; }
+.sf-summary-table th { padding:8px 8px; border-bottom:2px solid #eee; text-align:left; font-size:.85em; text-transform:uppercase; letter-spacing:.04em; color:#7f8c8d; }
+.sf-summary-table td { padding:12px 8px; border-bottom:1px solid #eee; text-align:left; vertical-align:middle; font-size:1em; }
+.sf-summary-table td strong { font-size:1.05em; }
+.sf-section-label { font-weight:700; font-size:.9em; margin:16px 0 8px; color:#444; }
+.sf-pre { background:#f4f4f4; border-radius:4px; padding:10px 12px; font-size:.82em; max-height:320px; overflow:auto; white-space:pre-wrap; margin:0; }
+@media (max-width:900px) { .sf-grid { grid-template-columns:1fr; } }
 </style>
 
-<div class="cb-wrap">
-
 <?php if ($message !== ''): ?>
-    <div class="cb-msg <?= htmlspecialchars($messageType) ?>"><?= htmlspecialchars($message) ?></div>
+<div class="sf-msg <?= htmlspecialchars($messageType) ?>"><?= htmlspecialchars($message) ?></div>
 <?php endif; ?>
-
 <?php if ($cmdSent): ?>
-    <div class="cb-msg info">
-        Command sent to <code><?= htmlspecialchars($cmd_topic) ?></code>.
-    </div>
+<div class="sf-msg info">Command sent to <code><?= htmlspecialchars($cmd_topic) ?></code>.</div>
 <?php endif; ?>
-
-<div class="cb-card">
+<div class="sf-card">
     <h3>Live Status</h3>
-    <div class="cb-help" style="margin-top:-6px; margin-bottom:12px;">
-        Need command/topic reference? <a href="help.html" target="_blank" rel="noopener">Open help page</a>.
-    </div>
-    <div class="cb-hero">
-        <div class="cb-hero-main">
-            <div class="cb-subtle">Pure FFAA backend &middot; auto-refresh every 5 seconds</div>
-            <div style="margin-top:14px; margin-bottom:10px;">
-                <button type="button" id="st-state" class="cb-power-badge cb-power-unknown cb-power-clickable" title="Click to toggle power">UNKNOWN</button>
-            </div>
-            <div style="font-size:1.1rem; font-weight:600;" id="st-input-main">Input &ndash;</div>
-            <small>Last updated: <span id="st-time">&ndash;</span></small>
-        </div>
-        <div class="cb-status-grid">
-            <div class="cb-tile">
-                <div class="cb-tile-label">Volume</div>
-                <div class="cb-tile-value" id="st-volume">&ndash;</div>
-            </div>
-            <div class="cb-tile">
-                <div class="cb-tile-label">Mute</div>
-                <div class="cb-tile-value" id="st-mute">FFAA</div>
-            </div>
-            <div class="cb-tile">
-                <div class="cb-tile-label">Current Input</div>
-                <div class="cb-tile-value" id="st-input">&ndash;</div>
-            </div>
-            <div class="cb-tile">
-                <div class="cb-tile-label">Play Mode</div>
-                <div class="cb-tile-value" id="st-sound-mode">&ndash;</div>
-            </div>
-            <div class="cb-tile">
-                <div class="cb-tile-label">Transport</div>
-                <div class="cb-tile-value" id="st-backend">FFAA / TCP 50006</div>
-            </div>
-        </div>
+    <p class="sf-muted">Pure FFAA backend &middot; auto-refresh every 5 seconds &middot; <a href="help.html" target="_blank" rel="noopener">MQTT reference</a></p>
+    <table class="sf-summary-table">
+        <thead>
+            <tr>
+                <th>Power</th>
+                <th>Input</th>
+                <th>Volume</th>
+                <th>Mute</th>
+                <th>Play Mode</th>
+                <th>Last updated</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><button type="button" id="st-state" class="sf-state-badge sf-state-unknown" title="Click to toggle power">UNKNOWN</button></td>
+                <td><strong id="st-input-main">&#8211;</strong></td>
+                <td id="st-volume">&#8211;</td>
+                <td id="st-mute">&#8211;</td>
+                <td id="st-sound-mode">&#8211;</td>
+                <td id="st-time" class="sf-muted">&#8211;</td>
+            </tr>
+        </tbody>
+    </table>
+    <div class="sf-actions" style="margin-top:14px;">
+        <form method="post" style="display:inline">
+            <input type="hidden" name="action" value="restart_daemon">
+            <button type="submit" class="sf-btn sf-btn-warning">Restart Daemon</button>
+        </form>
     </div>
 </div>
-
-<div class="cb-card">
+<div class="sf-card">
     <h3>Configuration</h3>
     <form method="post">
         <input type="hidden" name="action" value="save_config">
-
-        <div class="cb-section-title">Soundbar</div>
-        <div class="cb-grid">
-            <div class="cb-field">
+        <p class="sf-section-label">Soundbar</p>
+        <div class="sf-grid">
+            <div>
                 <label for="sb_ip">IP address</label>
                 <input type="text" id="sb_ip" name="sb_ip" value="<?= htmlspecialchars($sb_ip) ?>" placeholder="192.168.1.x">
             </div>
-            <div class="cb-field">
+            <div>
                 <label for="sb_port">FFAA TCP port</label>
                 <input type="number" id="sb_port" name="sb_port" value="<?= htmlspecialchars($sb_port) ?>" min="1" max="65535">
-                <div class="cb-help">Default is <code>50006</code>.</div>
+                <div class="sf-muted" style="margin-top:3px;">Default is <code>50006</code>.</div>
             </div>
-            <div class="cb-field">
-                <label for="sb_mac">MAC address <small class="text-muted">(legacy)</small></label>
+            <div>
+                <label for="sb_mac">MAC address <small>(legacy, optional)</small></label>
                 <input type="text" id="sb_mac" name="sb_mac" value="<?= htmlspecialchars($sb_mac) ?>" placeholder="optional">
-                <div class="cb-help">Kept for compatibility, but the current backend uses direct FFAA power on/off instead of WoL.</div>
+                <div class="sf-muted" style="margin-top:3px;">Not used for power control; kept for compatibility.</div>
             </div>
-            <div class="cb-field">
+            <div>
                 <label for="vol_step">Volume step (%)</label>
                 <input type="number" id="vol_step" name="vol_step" value="<?= htmlspecialchars($vol_step) ?>" min="1" max="20">
             </div>
         </div>
-
-        <div class="cb-section-title">MQTT (plugin → broker)</div>
-        <div class="cb-grid">
-            <div class="cb-field"><label>State topic</label><input type="text" name="state_topic" value="<?= htmlspecialchars($state_topic) ?>"></div>
-            <div class="cb-field"><label>Volume topic</label><input type="text" name="volume_topic" value="<?= htmlspecialchars($volume_topic) ?>"></div>
-            <div class="cb-field"><label>Mute topic</label><input type="text" name="mute_topic" value="<?= htmlspecialchars($mute_topic) ?>"></div>
-            <div class="cb-field"><label>Input topic</label><input type="text" name="input_topic" value="<?= htmlspecialchars($input_topic) ?>"></div>
-            <div class="cb-field"><label>Sound mode topic</label><input type="text" name="sound_mode_topic" value="<?= htmlspecialchars($sound_mode_topic) ?>"></div>
+        <p class="sf-section-label">MQTT Topics (plugin &rarr; broker)</p>
+        <div class="sf-grid">
+            <div><label>State topic</label><input type="text" name="state_topic" value="<?= htmlspecialchars($state_topic) ?>"></div>
+            <div><label>Volume topic</label><input type="text" name="volume_topic" value="<?= htmlspecialchars($volume_topic) ?>"></div>
+            <div><label>Mute topic</label><input type="text" name="mute_topic" value="<?= htmlspecialchars($mute_topic) ?>"></div>
+            <div><label>Input topic</label><input type="text" name="input_topic" value="<?= htmlspecialchars($input_topic) ?>"></div>
+            <div><label>Sound mode topic</label><input type="text" name="sound_mode_topic" value="<?= htmlspecialchars($sound_mode_topic) ?>"></div>
         </div>
-
-        <div class="cb-section-title">MQTT (broker → plugin)</div>
-        <div class="cb-grid">
-            <div class="cb-field" style="grid-column:1 / -1;"><label>Command topic</label><input type="text" name="cmd_topic" value="<?= htmlspecialchars($cmd_topic) ?>"></div>
+        <p class="sf-section-label">MQTT Topics (broker &rarr; plugin)</p>
+        <div class="sf-grid">
+            <div style="grid-column:1 / -1;"><label>Command topic</label><input type="text" name="cmd_topic" value="<?= htmlspecialchars($cmd_topic) ?>"></div>
         </div>
-
-        <div class="cb-section-title">Daemon</div>
-        <div class="cb-grid">
-            <div class="cb-field">
+        <p class="sf-section-label">Daemon</p>
+        <div class="sf-grid">
+            <div>
                 <label for="poll_int">Poll interval (seconds)</label>
                 <input type="number" id="poll_int" name="poll_int" value="<?= htmlspecialchars($poll_int) ?>" min="1" max="60">
             </div>
-            <div class="cb-field">
+            <div>
                 <label for="loglevel">Log level</label>
                 <select id="loglevel" name="loglevel">
                     <?php foreach ([3 => 'Warning (3)', 4 => 'Info (4)', 5 => 'Debug (5)'] as $value => $label): ?>
@@ -490,110 +386,93 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
                     <?php endforeach; ?>
                 </select>
             </div>
-            <div class="cb-field">
+            <div>
                 <label for="status_timeout">Socket timeout (seconds)</label>
                 <input type="number" id="status_timeout" name="status_timeout" value="<?= htmlspecialchars($status_timeout) ?>" min="1" max="10">
-                <div class="cb-help">Used for FFAA TCP reads on port 50006.</div>
+                <div class="sf-muted" style="margin-top:3px;">Used for FFAA TCP reads on port 50006.</div>
             </div>
-            <div class="cb-field">
+            <div>
                 <label for="ffaa_map">FFAA input map</label>
                 <textarea id="ffaa_map" name="ffaa_map" spellcheck="false"><?= htmlspecialchars($ffaa_map_text) ?></textarea>
-                <div class="cb-help">One mapping per line: <code>source_id=BYTE1,BYTE2,Name</code> &mdash; example: <code>3=06,02,ARC</code>.</div>
+                <div class="sf-muted" style="margin-top:3px;">One mapping per line: <code>id=BYTE1,BYTE2,Name</code> &mdash; e.g. <code>3=06,02,TV</code>.</div>
             </div>
         </div>
-
-        <div style="margin-top:18px;">
-            <button type="submit" class="btn btn-primary">Save Configuration</button>
+        <div style="margin-top:14px;">
+            <button type="submit" class="sf-btn sf-btn-primary">Save Configuration</button>
         </div>
     </form>
 </div>
-
-<div class="cb-card">
-    <h3>Command Center</h3>
-
-    <div class="cb-section-title">Quick Actions</div>
-    <form method="post" class="mb-3">
-        <input type="hidden" name="action" value="test_cmd">
-        <div class="cb-actions">
-            <button type="submit" name="test_cmd" value="power_on" class="btn btn-success">Power On</button>
-            <button type="submit" name="test_cmd" value="power_off" class="btn btn-danger">Standby</button>
-            <button type="submit" name="test_cmd" value="volume_down" class="btn btn-outline-secondary">Volume &minus;</button>
-            <button type="submit" name="test_cmd" value="volume_up" class="btn btn-outline-secondary">Volume +</button>
-            <button type="submit" name="test_cmd" value="mute_on" class="btn btn-outline-secondary">Mute</button>
-            <button type="submit" name="test_cmd" value="mute_toggle" class="btn btn-outline-secondary">Mute Toggle</button>
-            <button type="submit" name="test_cmd" value="mute_off" class="btn btn-outline-secondary">Unmute</button>
-        </div>
-    </form>
-
-    <div class="cb-section-title">Play Mode</div>
-    <form method="post" class="mb-3">
-        <input type="hidden" name="action" value="test_cmd">
-        <div class="cb-actions">
-            <button type="submit" name="test_cmd" value="mode_stereo" class="btn btn-outline-primary">Stereo</button>
-            <button type="submit" name="test_cmd" value="mode_movie" class="btn btn-outline-primary">Movie</button>
-            <button type="submit" name="test_cmd" value="mode_music" class="btn btn-outline-primary">Music</button>
-        </div>
-    </form>
-
-    <div class="cb-section-title">Input Sources</div>
-    <form method="post" id="input-buttons-form" style="margin-bottom:4px;">
+<div class="sf-card">
+    <h3>Quick Test Commands</h3>
+    <strong>Power</strong>
+    <div class="sf-btn-row" style="margin:8px 0 16px;">
+        <form method="post" style="display:inline"><input type="hidden" name="action" value="test_cmd">
+            <button type="submit" name="test_cmd" value="power_on" class="sf-btn sf-btn-success">Power On</button></form>
+        <form method="post" style="display:inline"><input type="hidden" name="action" value="test_cmd">
+            <button type="submit" name="test_cmd" value="power_off" class="sf-btn sf-btn-danger">Standby</button></form>
+    </div>
+    <strong>Volume</strong>
+    <div class="sf-btn-row" style="margin:8px 0 16px;">
+        <form method="post" style="display:inline"><input type="hidden" name="action" value="test_cmd">
+            <button type="submit" name="test_cmd" value="volume_down" class="sf-btn sf-btn-grey">Vol &minus;</button></form>
+        <form method="post" style="display:inline"><input type="hidden" name="action" value="test_cmd">
+            <button type="submit" name="test_cmd" value="volume_up" class="sf-btn sf-btn-grey">Vol +</button></form>
+    </div>
+    <strong>Mute</strong>
+    <div class="sf-btn-row" style="margin:8px 0 16px;">
+        <form method="post" style="display:inline"><input type="hidden" name="action" value="test_cmd">
+            <button type="submit" name="test_cmd" value="mute_on" class="sf-btn sf-btn-grey">Mute</button></form>
+        <form method="post" style="display:inline"><input type="hidden" name="action" value="test_cmd">
+            <button type="submit" name="test_cmd" value="mute_toggle" class="sf-btn sf-btn-grey">Mute Toggle</button></form>
+        <form method="post" style="display:inline"><input type="hidden" name="action" value="test_cmd">
+            <button type="submit" name="test_cmd" value="mute_off" class="sf-btn sf-btn-grey">Unmute</button></form>
+    </div>
+    <strong>Play Mode</strong>
+    <div class="sf-btn-row" style="margin:8px 0 16px;">
+        <form method="post" style="display:inline"><input type="hidden" name="action" value="test_cmd">
+            <button type="submit" name="test_cmd" value="mode_stereo" class="sf-btn sf-btn-grey">Stereo</button></form>
+        <form method="post" style="display:inline"><input type="hidden" name="action" value="test_cmd">
+            <button type="submit" name="test_cmd" value="mode_movie" class="sf-btn sf-btn-grey">Movie</button></form>
+        <form method="post" style="display:inline"><input type="hidden" name="action" value="test_cmd">
+            <button type="submit" name="test_cmd" value="mode_music" class="sf-btn sf-btn-grey">Music</button></form>
+    </div>
+    <strong>Input Sources</strong>
+    <p class="sf-muted">Active source is highlighted green. Buttons are generated from your FFAA map.</p>
+    <form method="post" id="input-buttons-form" style="margin-bottom:16px;">
         <input type="hidden" name="action" value="test_cmd">
         <input type="hidden" name="test_cmd" id="input-buttons-cmd" value="">
-        <div id="input-buttons" class="cb-actions">
-            <span class="cb-subtle">Waiting for FFAA input map…</span>
+        <div id="input-buttons" class="sf-btn-row">
+            <span class="sf-muted">Waiting for FFAA input map&#8230;</span>
         </div>
     </form>
-    <div class="cb-help" style="margin-top:0; margin-bottom:10px;">Buttons are generated from your FFAA map (default order: BDP, SAT, PS, TV, CD, DVD, AUX, NET, BT).</div>
-
-    <div class="cb-section-title">Single Command Topic Contract</div>
-    <div class="cb-help" style="margin-bottom:10px;">Publish all payloads to <code><?= htmlspecialchars($cmd_topic) ?></code>.</div>
-    <div class="cb-help" style="line-height:1.65;">
-        <code>power_on</code>, <code>power_off</code>, <code>volume_up</code>, <code>volume_down</code>, <code>volume_set_N</code>,<br>
-        <code>mode_stereo</code>, <code>mode_movie</code>, <code>mode_music</code>,<br>
-        <code>input_bdp</code>, <code>input_sat</code>, <code>input_tv</code>, <code>input_dvd</code>, ...<br>
-        <code>mute_on</code>, <code>mute_off</code>, <code>mute_toggle</code> (FFAA, with HTTP fallback only if needed)
-    </div>
-
-    <div class="cb-section-title">Custom Command</div>
-    <form method="post" class="mb-3">
+    <strong>Custom Command</strong>
+    <p class="sf-muted">Publish to <code><?= htmlspecialchars($cmd_topic) ?></code> &mdash; e.g. <code>volume_set_40</code>, <code>input_tv</code>, <code>mode_movie</code></p>
+    <form method="post" style="display:flex; gap:8px; flex-wrap:wrap; margin-top:6px;">
         <input type="hidden" name="action" value="custom_cmd">
-        <div class="input-group" style="max-width:460px;">
-            <input type="text" name="custom_cmd_payload" class="form-control" placeholder="e.g. volume_set_40, input_tv, mode_movie">
-            <div class="input-group-append">
-                <button type="submit" class="btn btn-outline-primary">Send</button>
-            </div>
-        </div>
-    </form>
-
-    <form method="post">
-        <input type="hidden" name="action" value="restart_daemon">
-        <button type="submit" class="btn btn-secondary" onclick="this.disabled=true; this.textContent='Restarting…';">Restart Daemon</button>
+        <input type="text" name="custom_cmd_payload" placeholder="e.g. volume_set_40, input_tv, mode_movie" style="padding:6px 8px; border:1px solid #ccc; border-radius:4px; width:300px;">
+        <button type="submit" class="sf-btn sf-btn-primary">Send</button>
     </form>
 </div>
-
-<div class="cb-card">
-    <h3>Log</h3>
-    <pre class="cb-log"><?php
+<div class="sf-card">
+    <h3>Recent Log</h3>
+    <p class="sf-muted">Showing the last 80 lines from <code><?= htmlspecialchars($logfile) ?></code>.</p>
+    <pre class="sf-pre"><?php
 if (file_exists($logfile) && filesize($logfile) > 0) {
     $lines = file($logfile);
     echo htmlspecialchars(implode('', array_slice($lines, -80)));
 } elseif (file_exists($logfile)) {
     echo "Log file exists but is empty.\n";
-    echo "→ Enter the Soundbar IP above and save the configuration.\n";
-    echo "→ Then restart the daemon if needed.";
+    echo "\u2192 Enter the Soundbar IP above and save the configuration.\n";
+    echo "\u2192 Then restart the daemon if needed.";
 } else {
     echo "Log file not found: $logfile\n";
-    echo "→ Check whether cantonbar.service is installed and running.";
+    echo "\u2192 Check whether cantonbar.service is installed and running.";
 }
 ?></pre>
 </div>
-
-</div>
-
 <script>
 var lastKnownPowerState = 'unknown';
 var powerCommandPending = false;
-
 function htmlEscape(s) {
     return String(s || '')
         .replace(/&/g, '&amp;')
@@ -602,54 +481,39 @@ function htmlEscape(s) {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
 }
-
-function powerBadgeClass(state) {
-    if (state === 'on') return 'cb-power-badge cb-power-on';
-    if (state === 'standby') return 'cb-power-badge cb-power-standby';
-    return 'cb-power-badge cb-power-unknown';
+function stateBadgeClass(state) {
+    if (state === 'on') return 'sf-state-badge sf-state-on';
+    if (state === 'standby') return 'sf-state-badge sf-state-standby';
+    return 'sf-state-badge sf-state-unknown';
 }
-
 function prettyMute(value) {
     if (value === 'unsupported') return 'UNSUPPORTED';
     if (value === 'on') return 'ON';
     if (value === 'off') return 'OFF';
-    return '–';
+    return '\u2013';
 }
-
 function renderInputButtons(inputMapRaw, currentInput) {
     var holder = document.getElementById('input-buttons');
     if (!holder) return;
-
     var parsed = {};
-    try {
-        parsed = inputMapRaw ? JSON.parse(inputMapRaw) : {};
-    } catch (e) {
-        parsed = {};
-    }
-
+    try { parsed = inputMapRaw ? JSON.parse(inputMapRaw) : {}; } catch (e) { parsed = {}; }
     var ids = Object.keys(parsed).sort(function(a, b) {
-        var ai = parseInt(a, 10);
-        var bi = parseInt(b, 10);
+        var ai = parseInt(a, 10), bi = parseInt(b, 10);
         if (!isNaN(ai) && !isNaN(bi)) return ai - bi;
         return String(a).localeCompare(String(b));
     });
-
     if (!ids.length) {
-        holder.innerHTML = '<span class="cb-subtle">No FFAA input mappings configured yet.</span>';
+        holder.innerHTML = '<span class="sf-muted">No FFAA input mappings configured yet.</span>';
         return;
     }
-
     var current = String(currentInput || '');
     holder.innerHTML = ids.map(function(id) {
         var name = String(parsed[id] || '');
         var active = name.toLowerCase() === current.toLowerCase();
-        var cls = active ? 'btn btn-success' : 'btn btn-outline-primary';
-        return '<button type="button" class="' + cls + '" data-input-name="' + htmlEscape(name) + '">'
-            + htmlEscape(name)
-            + '</button>';
+        var cls = active ? 'sf-btn sf-btn-success' : 'sf-btn sf-btn-grey';
+        return '<button type="button" class="' + cls + '" data-input-name="' + htmlEscape(name) + '">' + htmlEscape(name) + '</button>';
     }).join('');
 }
-
 function sendInputCommand(inputName) {
     var cmdField = document.getElementById('input-buttons-cmd');
     var form = document.getElementById('input-buttons-form');
@@ -659,77 +523,43 @@ function sendInputCommand(inputName) {
     cmdField.value = 'input_' + token;
     form.submit();
 }
-
 function sendQuickCommand(command) {
     var form = document.createElement('form');
-    form.method = 'post';
-    form.action = 'index.php';
-
-    var action = document.createElement('input');
-    action.type = 'hidden';
-    action.name = 'action';
-    action.value = 'test_cmd';
-    form.appendChild(action);
-
-    var cmd = document.createElement('input');
-    cmd.type = 'hidden';
-    cmd.name = 'test_cmd';
-    cmd.value = command;
-    form.appendChild(cmd);
-
-    document.body.appendChild(form);
-    form.submit();
+    form.method = 'post'; form.action = 'index.php';
+    var a = document.createElement('input'); a.type = 'hidden'; a.name = 'action'; a.value = 'test_cmd'; form.appendChild(a);
+    var c = document.createElement('input'); c.type = 'hidden'; c.name = 'test_cmd'; c.value = command; form.appendChild(c);
+    document.body.appendChild(form); form.submit();
 }
-
 function updateStatus() {
     fetch('index.php?ajax=status&_=' + Date.now())
         .then(function(r) { return r.json(); })
         .then(function(d) {
             var state = String(d.state || 'unknown');
             lastKnownPowerState = state;
-            document.getElementById('st-state').className = powerBadgeClass(state);
-            document.getElementById('st-state').classList.add('cb-power-clickable');
-            if (powerCommandPending) {
-                document.getElementById('st-state').classList.add('cb-power-busy');
-            }
-            document.getElementById('st-state').textContent = state.toUpperCase();
-            document.getElementById('st-volume').textContent = d.volume !== '-' ? (String(d.volume) + '%') : '–';
+            var badge = document.getElementById('st-state');
+            badge.className = powerCommandPending ? 'sf-state-badge sf-state-busy' : stateBadgeClass(state);
+            badge.textContent = powerCommandPending ? 'SENDING\u2026' : state.toUpperCase();
+            document.getElementById('st-input-main').textContent = (d.input && d.input !== '-') ? String(d.input) : '\u2013';
+            document.getElementById('st-volume').textContent = d.volume !== '-' ? (String(d.volume) + '%') : '\u2013';
             document.getElementById('st-mute').textContent = prettyMute(String(d.mute || 'unsupported'));
-            document.getElementById('st-input').textContent = d.input !== '-' ? String(d.input) : '–';
-            document.getElementById('st-sound-mode').textContent = d.sound_mode && d.sound_mode !== '-' ? String(d.sound_mode) : '–';
-            document.getElementById('st-backend').textContent = d.backend || 'FFAA / TCP 50006';
-            document.getElementById('st-time').textContent = d.updated || '–';
-
-            var inputMain = 'Input –';
-            if (d.input && d.input !== '-') {
-                inputMain = String(d.input);
-            }
-            document.getElementById('st-input-main').textContent = inputMain;
-
+            document.getElementById('st-sound-mode').textContent = (d.sound_mode && d.sound_mode !== '-') ? String(d.sound_mode) : '\u2013';
+            document.getElementById('st-time').textContent = d.updated || '\u2013';
             renderInputButtons(d.input_map || '{}', d.input || '');
-            if (powerCommandPending) {
-                powerCommandPending = false;
-            }
+            if (powerCommandPending) powerCommandPending = false;
         })
         .catch(function() {});
 }
-
 document.addEventListener('click', function(ev) {
     var btn = ev.target.closest('button[data-input-name]');
-    if (btn) {
-        sendInputCommand(btn.getAttribute('data-input-name'));
-        return;
-    }
-
+    if (btn) { sendInputCommand(btn.getAttribute('data-input-name')); return; }
     var powerBtn = ev.target.closest('#st-state');
     if (powerBtn) {
         powerCommandPending = true;
-        powerBtn.className = 'cb-power-badge cb-power-busy cb-power-clickable';
-        powerBtn.textContent = 'SENDING...';
+        powerBtn.className = 'sf-state-badge sf-state-busy';
+        powerBtn.textContent = 'SENDING\u2026';
         sendQuickCommand(lastKnownPowerState === 'on' ? 'power_off' : 'power_on');
     }
 });
-
 updateStatus();
 setInterval(updateStatus, 5000);
 <?php if ($refresh_after_cmd): ?>
@@ -737,5 +567,4 @@ setTimeout(updateStatus, 1800);
 setTimeout(updateStatus, 4200);
 <?php endif; ?>
 </script>
-
 <?php LBWeb::lbfooter(); ?>
