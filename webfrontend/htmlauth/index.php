@@ -305,7 +305,7 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
 <?php endif; ?>
 <div class="sf-card">
     <h3>Live Status</h3>
-    <p class="sf-muted">Pure FFAA backend &middot; auto-refresh every 5 seconds &middot; <a href="help.html" target="_blank" rel="noopener">MQTT reference</a></p>
+    <p class="sf-muted">Pure FFAA backend &middot; auto-refresh every 5 seconds</p>
     <table class="sf-summary-table">
         <thead>
             <tr>
@@ -329,6 +329,7 @@ LBWeb::lbheader('Canton Smart Soundbar', 'cantonbar', 'help.html');
         </tbody>
     </table>
     <div class="sf-actions" style="margin-top:14px;">
+        <a href="help.html" target="_blank" rel="noopener" class="sf-btn sf-btn-outline">Help</a>
         <form method="post" style="display:inline">
             <input type="hidden" name="action" value="restart_daemon">
             <button type="submit" class="sf-btn sf-btn-warning">Restart Daemon</button>
